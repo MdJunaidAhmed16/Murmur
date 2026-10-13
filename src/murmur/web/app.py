@@ -11,13 +11,17 @@ import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from mcp import Client
 
 from murmur.agent.loop import Agent
-from murmur.agent.prompts import SYSTEM_PROMPT
+from murmur.agent.memory_jobs import MemoryJobs
+from murmur.agent.tools import McpToolBox
 from murmur.audio.frames import FRAME_SAMPLES, INPUT_SAMPLE_RATE
 from murmur.audio.vad import SileroVAD
 from murmur.config import Settings, get_settings
 from murmur.llm import LLM, build_llm
+from murmur.mcp_servers.memory import build_memory_server
+from murmur.memory import MemoryService, open_memory
 from murmur.pipeline.metrics import TurnLog
 from murmur.pipeline.orchestrator import Session
 from murmur.stt.local import WhisperSTT
@@ -25,6 +29,8 @@ from murmur.tts.local import KokoroTTS
 
 log = structlog.get_logger()
 STATIC_DIR = Path(__file__).parent / "static"
+# The model sees only forget; recall is injected into the prompt, not called as a tool.
+AGENT_TOOLS = {"forget"}
 
 
 @dataclass
@@ -33,27 +39,25 @@ class Engines:
     stt: WhisperSTT
     tts: KokoroTTS
     llm: LLM
+    memory: MemoryService
+    memory_jobs: MemoryJobs
+    tools: McpToolBox
     turn_log: TurnLog
     # Single user, one session at a time (CLAUDE.md scope).
     session_lock: asyncio.Lock
 
 
-def load_engines(settings: Settings) -> Engines:
+def load_models(settings: Settings) -> tuple[WhisperSTT, KokoroTTS, MemoryService]:
     stt = WhisperSTT(
         settings.stt_model, settings.stt_device, settings.stt_compute_type, settings.models_dir
     )
     tts = KokoroTTS(settings.models_dir, settings.tts_voice, settings.tts_speed)
+    memory = open_memory(settings)
     # The first call pays for kernel loading and allocation; keep it out of turn one's numbers.
     stt.warm_up()
     tts.warm_up()
-    return Engines(
-        settings=settings,
-        stt=stt,
-        tts=tts,
-        llm=build_llm(settings),
-        turn_log=TurnLog(settings.results_dir),
-        session_lock=asyncio.Lock(),
-    )
+    memory.recall("warm up", k=1)
+    return stt, tts, memory
 
 
 class WebSocketOutbound:
@@ -76,9 +80,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.engines = await asyncio.to_thread(load_engines, settings)
-        log.info("ready", url=f"http://{settings.host}:{settings.port}")
-        yield
+        stt, tts, memory = await asyncio.to_thread(load_models, settings)
+        llm = build_llm(settings)
+        jobs = MemoryJobs.from_settings(llm, memory, settings)
+        server = build_memory_server(memory, settings.forget_threshold, before_forget=jobs.flush)
+        async with Client(server) as client, asyncio.TaskGroup() as background:
+            worker = background.create_task(jobs.run())
+            stale = await jobs.decay()
+            app.state.engines = Engines(
+                settings=settings,
+                stt=stt,
+                tts=tts,
+                llm=llm,
+                memory=memory,
+                memory_jobs=jobs,
+                tools=await McpToolBox.connect(client, AGENT_TOOLS),
+                turn_log=TurnLog(settings.results_dir),
+                session_lock=asyncio.Lock(),
+            )
+            log.info(
+                "ready",
+                url=f"http://{settings.host}:{settings.port}",
+                memories=len(memory.all(include_superseded=False)),
+                decayed=stale,
+            )
+            yield
+            worker.cancel()
 
     app = FastAPI(lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -108,7 +135,9 @@ async def _serve_session(websocket: WebSocket, engines: Engines) -> None:
         vad=SileroVAD(settings.models_dir / "silero_vad.onnx"),
         stt=engines.stt,
         tts=engines.tts,
-        agent=Agent(engines.llm, SYSTEM_PROMPT, settings.working_memory_turns),
+        agent=Agent(engines.llm, settings.working_memory_turns, engines.tools),
+        memory=engines.memory,
+        memory_jobs=engines.memory_jobs,
         backend_name=engines.llm.backend_name,
         outbound=outbound,
         turn_log=engines.turn_log,

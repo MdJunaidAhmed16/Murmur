@@ -14,7 +14,7 @@ function addLine(who, text) {
   const div = document.createElement("div");
   div.className = `line ${who}`;
   div.innerHTML = `<span class="who"></span><span class="text"></span>`;
-  div.querySelector(".who").textContent = who === "user" ? "You" : "Murmur";
+  div.querySelector(".who").textContent = { user: "You", assistant: "Murmur", memory: "Recalled" }[who];
   div.querySelector(".text").textContent = text;
   $("transcript").appendChild(div);
   div.scrollIntoView({ block: "end" });
@@ -49,6 +49,9 @@ function onEvent(msg) {
       $("partial").textContent = "";
       addLine("user", msg.text);
       assistantLine = null;
+      return;
+    case "recalled":
+      addLine("memory", msg.memories.join(" · "));
       return;
     case "assistant_delta":
       if (!assistantLine) assistantLine = addLine("assistant", "");
