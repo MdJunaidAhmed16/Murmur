@@ -49,30 +49,30 @@ to cut scope from, not a day to extend.
 ## Days 4–6 — Make it remember
 
 ### Store
-- [ ] SQLite schema + vector index
-- [ ] Memory record type with `superseded_by`, `use_count`, `last_used_at`
+- [x] SQLite schema + vector index
+- [x] Memory record type with `superseded_by`, `use_count`, `last_used_at`
 
 ### Operations
-- [ ] `write` — extract atomic facts after a turn, **async, off the turn path**
-- [ ] `recall` — hybrid retrieval, **40ms budget, on the turn path**
-- [ ] `consolidate` — merge, supersede, decay; batched
-- [ ] `forget` — hard delete, exposed as a tool
+- [x] `write` — extract atomic facts after a turn, **async, off the turn path**
+- [x] `recall` — hybrid retrieval, **40ms budget, on the turn path**
+- [x] `consolidate` — merge, supersede, decay; batched
+- [x] `forget` — hard delete, exposed as a tool
 
 ### Integration
-- [ ] Memory MCP server
-- [ ] Recall wired into prompt assembly inside budget
-- [ ] Working memory (session) separate from long-term
+- [x] Memory MCP server
+- [x] Recall wired into prompt assembly inside budget
+- [x] Working memory (session) separate from long-term
 
 ### Checks
-- [ ] 20 scripted facts stated, second conversation retrieves them
-- [ ] Recall precision recorded
-- [ ] Contradiction test: state, contradict, check which surfaces
-- [ ] Store growth per 100 turns, before and after consolidation
+- [x] 20 scripted facts stated, second conversation retrieves them
+- [x] Recall precision recorded
+- [x] Contradiction test: state, contradict, check which surfaces
+- [x] Store growth per 100 turns, before and after consolidation
 
 ### Gate 2
-- [ ] Recalls a fact across a process restart
-- [ ] Recall stays inside 40ms
-- [ ] `reports/R2-memory.md`
+- [x] Recalls a fact across a process restart
+- [x] Recall stays inside 40ms
+- [x] `reports/R2-memory.md`
 
 ---
 

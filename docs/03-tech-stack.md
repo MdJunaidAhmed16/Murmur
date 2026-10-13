@@ -13,9 +13,10 @@ the project exists.
 | LLM (local) | Qwen2.5-1.5B-Instruct on vLLM | Fits 8GB with room for KV cache; tool-capable |
 | LLM (hosted) | Any API model | Same interface, for the always-on demo |
 | TTS | Kokoro 82M (ONNX) | Streaming synthesis, better voice than Piper; see decisions |
-| Tools | MCP | One tool layer the agent consumes |
-| Memory store | SQLite + a vector index | One file, no server, survives restarts |
-| Retrieval | LlamaIndex | Hybrid retrieval over the fact store |
+| Tools | MCP (Python SDK 2.x), in-process | One tool layer the agent consumes |
+| Memory store | SQLite + in-memory numpy matrix | One file, no server, survives restarts |
+| Embeddings | bge-small-en-v1.5 via fastembed (ONNX, CPU) | ~6 ms per query, inside the 40 ms recall budget |
+| Retrieval | Cosine + recency/use boosts, hand-rolled | Sub-millisecond at this scale; see decisions |
 | Web | FastAPI + raw PCM over WebSocket | Audio in and out of a browser |
 | Deploy | GCP | Hosted backend and the public demo |
 
@@ -42,7 +43,26 @@ LLM. Risk: it may not meet the 200 ms first-audio budget on CPU. If R1 shows tha
 options in order: int8 model, GPU execution provider, fall back to Piper.
 
 **Endpointing starts at 200 ms of silence** (`MURMUR_ENDPOINT_SILENCE_MS`). This is
-the docs' budget figure, not a tuned value. Tuned on day 7.
+the docs' budget figure, not a tuned value. Tuned on day 7. Meanwhile, a turn cut
+off before the agent says anything is merged into the next one (turn continuation),
+so an early endpoint wastes compute instead of splitting a request in two.
+
+**Retrieval: no LlamaIndex (day 4).** One user's store is a few hundred facts. A
+numpy dot product over them is sub-millisecond; the query embedding (~6 ms) is the
+whole cost. LlamaIndex would add dependencies and per-call overhead inside a 40 ms
+budget for no retrieval gain at this size. Revisit only if the store grows by
+orders of magnitude.
+
+**Recall is in-process, not an MCP call.** The memory MCP server exists (forget,
+recall, remember, history) and the agent consumes it for `forget`, but recall on the
+turn path reads the snapshot directly: a protocol hop is not worth paying inside
+the budget.
+
+**Small-model guards around the LLM (day 5).** Qwen2.5-1.5B invents facts, judges
+contradictions too eagerly, and calls tools it was not asked to. Each failure got a
+deterministic guard rather than a bigger prompt: a grounding check on extracted
+facts, an embedding-similarity gate (≥ 0.70) before the contradiction judge, and
+the `forget` tool offered only on forget-intent words. Measured in R2.
 
 ## What you actually get better at
 
