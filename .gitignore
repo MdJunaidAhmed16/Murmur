@@ -1,0 +1,12 @@
+models/
+results/
+.env
+*.wav
+__pycache__/
+.venv/
+.venv-vllm/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+*.db

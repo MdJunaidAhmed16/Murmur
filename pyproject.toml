@@ -1,0 +1,63 @@
+[project]
+name = "murmur"
+version = "0.1.0"
+description = "A local voice agent that answers fast and remembers you."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "structlog",
+    "numpy",
+    "openai",
+    "onnxruntime",
+    "faster-whisper",
+    "kokoro-onnx",
+    # ctranslate2 loads cuBLAS/cuDNN at runtime; these wheels supply them without a system CUDA.
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12==9.*",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "websockets",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/murmur"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF", "T20", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["T20"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*", "kokoro_onnx.*", "onnxruntime.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
