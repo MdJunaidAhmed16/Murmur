@@ -3,7 +3,9 @@ import json
 from pathlib import Path
 
 from murmur.agent.loop import Agent
+from murmur.agent.memory_jobs import MemoryJobs
 from murmur.config import Settings
+from murmur.memory import MemoryService
 from murmur.pipeline.metrics import TurnLog
 from murmur.pipeline.orchestrator import Session
 from tests.fakes import (
@@ -14,11 +16,17 @@ from tests.fakes import (
     FakeTTS,
     LoudnessVAD,
     RecordingOutbound,
+    WordEmbedder,
+    make_memory,
 )
 
 
 def make_session(
-    tmp_path: Path, stt: FakeSTT, llm: FakeLLM, tts: FakeTTS
+    tmp_path: Path,
+    stt: FakeSTT,
+    llm: FakeLLM,
+    tts: FakeTTS,
+    memory: MemoryService | None = None,
 ) -> tuple[Session, Agent, RecordingOutbound]:
     settings = Settings(
         _env_file=None,  # type: ignore[call-arg]
@@ -27,7 +35,8 @@ def make_session(
         stt_partial_interval_ms=0,
         results_dir=tmp_path,
     )
-    agent = Agent(llm, "system", max_turns=4)
+    memory = memory or make_memory(tmp_path / "memory.db")
+    agent = Agent(llm, max_turns=4)
     out = RecordingOutbound()
     session = Session(
         settings=settings,
@@ -35,6 +44,8 @@ def make_session(
         stt=stt,
         tts=tts,
         agent=agent,
+        memory=memory,
+        memory_jobs=MemoryJobs.from_settings(llm, memory, settings),
         backend_name=llm.backend_name,
         outbound=out,
         turn_log=TurnLog(tmp_path),
@@ -114,6 +125,61 @@ async def test_speech_clears_browser_audio_after_turn_finished_sending(tmp_path:
 
     assert out.of_type("clear")
     await session.close()
+
+
+async def test_early_endpoint_carries_words_into_the_next_turn(tmp_path: Path) -> None:
+    stt = FakeSTT(["please forget what I told you", "about my sister"])
+    llm = FakeLLM("Done, forgotten.", delay=0.05)  # slow: no audio before the user resumes
+    session, agent, out = make_session(tmp_path, stt, llm, FakeTTS())
+
+    await speak(session)
+    await asyncio.sleep(0.01)
+    await speak(session)  # user carries on after a pause
+    await wait_turn(session)
+
+    asked = llm.prompts[-1][-1]
+    assert asked.role == "user" and asked.content == "please forget what I told you about my sister"
+    assert [m.content for m in agent.history if m.role == "user"] == [asked.content]
+    assert [e["text"] for e in out.of_type("user")][-1] == asked.content
+
+
+async def test_recalled_memories_reach_the_prompt(tmp_path: Path) -> None:
+    memory = make_memory(tmp_path / "memory.db")
+    memory.add(["Has a sister called Afifa", "Drives a red Swift"], None)
+    llm = FakeLLM("Afifa, of course.")
+    session, _, out = make_session(
+        tmp_path, FakeSTT(["what is my sister called"]), llm, FakeTTS(), memory
+    )
+
+    await speak(session)
+    await wait_turn(session)
+
+    system = llm.prompts[0][0].content
+    assert "Has a sister called Afifa" in system
+    assert "Drives a red Swift" not in system
+    assert out.of_type("recalled") == [
+        {"type": "recalled", "memories": ["Has a sister called Afifa"]}
+    ]
+    record = out.of_type("metrics")
+    assert record and record[0]["memories_retrieved"] == 1
+    assert record[0]["ms"]["memory_recall"] is not None
+
+
+async def test_recall_over_budget_answers_without_memories(tmp_path: Path) -> None:
+    # 100 ms embedding against the 40 ms budget.
+    memory = make_memory(tmp_path / "memory.db", WordEmbedder(delay_s=0.1))
+    memory.add(["Has a sister called Afifa"], None)
+    llm = FakeLLM("I am not sure.")
+    session, _, out = make_session(
+        tmp_path, FakeSTT(["what is my sister called"]), llm, FakeTTS(), memory
+    )
+
+    await speak(session)
+    await wait_turn(session)
+
+    assert "Afifa" not in llm.prompts[0][0].content
+    assert out.audio_chunks > 0  # the turn still spoke
+    assert json.loads((tmp_path / "turns.jsonl").read_text())["ms"]["memory_recall"] < 100
 
 
 async def test_noise_without_words_is_not_a_turn(tmp_path: Path) -> None:

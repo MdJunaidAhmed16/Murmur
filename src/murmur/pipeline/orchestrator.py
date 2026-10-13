@@ -1,7 +1,8 @@
-"""Wires VAD → STT → agent → TTS for one session and owns cancellation.
+"""Wires VAD → STT → recall → agent → TTS for one session and owns cancellation.
 
 Each turn is one task holding one TaskGroup (generation + synthesis). Barge-in cancels that
-task, which cancels everything in it as a unit.
+task, which cancels everything in it as a unit. Memory writes are handed to the background
+worker after the turn; nothing here waits on them.
 """
 
 import asyncio
@@ -12,9 +13,11 @@ from typing import Any, Protocol
 import structlog
 
 from murmur.agent.loop import Agent
+from murmur.agent.memory_jobs import MemoryJobs, TurnForMemory
 from murmur.audio.frames import FRAME_MS, Float32Audio, pcm16_to_float
 from murmur.audio.vad import EndpointDetector, VadEvent
 from murmur.config import Settings
+from murmur.memory import Memory, MemoryService
 from murmur.pipeline.metrics import TurnLog, TurnTimer, now_ms
 from murmur.stt.base import SpeechToText, TranscriptionStream
 from murmur.tts.base import TextToSpeech
@@ -45,6 +48,8 @@ class Session:
         stt: SpeechToText,
         tts: TextToSpeech,
         agent: Agent,
+        memory: MemoryService,
+        memory_jobs: MemoryJobs,
         backend_name: str,
         outbound: Outbound,
         turn_log: TurnLog,
@@ -54,6 +59,8 @@ class Session:
         self._stt = stt
         self._tts = tts
         self._agent = agent
+        self._memory = memory
+        self._jobs = memory_jobs
         self._backend_name = backend_name
         self._out = outbound
         self._turn_log = turn_log
@@ -66,6 +73,11 @@ class Session:
         self._turn: asyncio.Task[None] | None = None
         self._last_speech_at = 0.0
         self._audio_since_clear = False
+        # The loop holds tasks weakly; an unreferenced fire-and-forget task can be collected
+        # before it runs. This set keeps them alive until done.
+        self._background: set[asyncio.Task[None]] = set()
+        # User words from a turn cut off before the agent said anything (see _finish_turn).
+        self._unanswered = ""
 
     async def handle_frame(self, data: bytes) -> None:
         frame = pcm16_to_float(data)
@@ -83,10 +95,18 @@ class Session:
             await self._on_speech_start()
         elif event is VadEvent.ENDPOINT:
             self._on_endpoint()
+        self._update_voice_idle()
 
     @property
     def agent_speaking(self) -> bool:
         return self._turn is not None and not self._turn.done()
+
+    def _update_voice_idle(self, _: object = None) -> None:
+        # Background memory work holds off while the user talks or a turn runs.
+        if self._detector.in_speech or self.agent_speaking:
+            self._jobs.voice_idle.clear()
+        else:
+            self._jobs.voice_idle.set()
 
     async def _on_speech_start(self) -> None:
         if self._settings.barge_in:
@@ -111,6 +131,7 @@ class Session:
         timer.mark("speech_end", self._last_speech_at)
         timer.mark("endpoint")
         self._turn = asyncio.create_task(self._run_turn(stream, timer))
+        self._turn.add_done_callback(self._update_voice_idle)
 
     async def interrupt(self) -> None:
         # Clear even when no turn is running: audio is sent faster than real time, so the browser
@@ -135,16 +156,20 @@ class Session:
 
     async def _run_turn(self, stream: TranscriptionStream, timer: TurnTimer) -> None:
         spoken: list[str] = []
+        recalled: list[Memory] = []
+        previous_reply = self._agent.last_reply()
         text = ""
         try:
-            text = await stream.finalize()
+            heard = await stream.finalize()
             timer.mark("stt_final")
-            if not text:
+            if not heard:
                 return
+            text, self._unanswered = f"{self._unanswered} {heard}".strip(), ""
             await self._out.event({"type": "user", "text": text})
+            recalled = await self._recall(text, timer)
             sentences: asyncio.Queue[str | None] = asyncio.Queue()
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._generate(text, timer, sentences))
+                tg.create_task(self._generate(text, recalled, timer, sentences))
                 tg.create_task(self._speak(timer, sentences, spoken))
         except asyncio.CancelledError:
             timer.barge_in = True
@@ -155,26 +180,73 @@ class Session:
             await self._out.event({"type": "error", "message": str(exc)})
         finally:
             if text:
-                self._finish_turn(timer, " ".join(spoken))
+                self._finish_turn(timer, text, previous_reply, recalled, " ".join(spoken))
 
-    def _finish_turn(self, timer: TurnTimer, spoken_text: str) -> None:
-        self._agent.commit_reply(spoken_text)
+    async def _recall(self, text: str, timer: TurnTimer) -> list[Memory]:
+        timer.mark("memory_recall_start")
+        try:
+            recalled = await asyncio.wait_for(
+                asyncio.to_thread(self._memory.recall, text, self._settings.recall_k),
+                timeout=self._settings.recall_budget_ms / 1000,
+            )
+        except TimeoutError:
+            # Over budget: answer without memories rather than make the user wait.
+            log.warning("recall_over_budget", budget_ms=self._settings.recall_budget_ms)
+            recalled = []
+        timer.mark("memory_recall")
+        timer.memories_retrieved = len(recalled)
+        if recalled:
+            await self._out.event({"type": "recalled", "memories": [m.text for m in recalled]})
+        return recalled
+
+    def _finish_turn(
+        self,
+        timer: TurnTimer,
+        user_text: str,
+        previous_reply: str,
+        recalled: list[Memory],
+        spoken_text: str,
+    ) -> None:
         timer.spoken_chars = len(spoken_text)
+        timer.tool_calls = list(self._agent.last_tool_calls)
         record = self._turn_log.write(timer)
         log.info("turn", **record)
+        if timer.barge_in and not spoken_text and not timer.tool_calls:
+            # Cut off before saying anything: the user was not interrupting, they were still
+            # talking and endpointing fired early. Carry their words into the next turn, so
+            # "please forget what I told you, ... about my sister" stays one request.
+            self._agent.retract_unanswered()
+            self._unanswered = user_text
+        else:
+            self._agent.commit_reply(spoken_text)
+            self._jobs.submit(
+                TurnForMemory(
+                    turn_id=timer.turn_id,
+                    user_text=user_text,
+                    previous_reply=previous_reply,
+                    recalled_ids=tuple(m.id for m in recalled),
+                    skip_extraction="forget" in timer.tool_calls,
+                )
+            )
         # Fire-and-forget: this runs during cancellation, where awaiting is unreliable.
         task = asyncio.get_running_loop().create_task(
             self._out.event({"type": "metrics", **record})
         )
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
         task.add_done_callback(_ignore_result)
 
     async def _generate(
-        self, text: str, timer: TurnTimer, sentences: asyncio.Queue[str | None]
+        self,
+        text: str,
+        recalled: list[Memory],
+        timer: TurnTimer,
+        sentences: asyncio.Queue[str | None],
     ) -> None:
         chunker = SentenceChunker()
         reply: list[str] = []
         timer.mark("llm_request")
-        async for delta in self._agent.respond(text):
+        async for delta in self._agent.respond(text, [m.text for m in recalled]):
             timer.mark("llm_first_token")
             reply.append(delta)
             await self._out.event({"type": "assistant_delta", "text": delta})
@@ -204,6 +276,7 @@ class Session:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        self._jobs.voice_idle.set()
 
 
 def _ignore_result(task: asyncio.Task[None]) -> None:
