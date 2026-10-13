@@ -29,6 +29,7 @@ serve:
 	PATH="$(LINUX_PATH)" VLLM_USE_FLASHINFER_SAMPLER=0 .venv-vllm/bin/vllm serve $(LLM_MODEL) \
 		--gpu-memory-utilization $(VLLM_GPU_UTIL) \
 		--max-model-len $(VLLM_MAX_LEN) \
+		--enable-auto-tool-choice --tool-call-parser hermes \
 		--port 8000
 
 run:
