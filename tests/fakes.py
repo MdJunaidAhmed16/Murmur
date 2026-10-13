@@ -1,13 +1,20 @@
 """Stand-ins for the model-backed stages so the pipeline runs without a GPU or microphone."""
 
 import asyncio
+import hashlib
+import re
+import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from murmur.audio.frames import FRAME_SAMPLES, Float32Audio
-from murmur.llm.base import LLM, ChatMessage
+from murmur.llm.base import LLM, ChatMessage, ToolCall, ToolSpec
+from murmur.memory import MemoryService
+from murmur.memory.embed import Vector
+from murmur.memory.store import MemoryStore
 from murmur.stt.base import SpeechToText, TranscriptionStream
 from murmur.tts.base import TextToSpeech
 
@@ -47,18 +54,40 @@ class FakeSTT(SpeechToText):
 
 
 class FakeLLM(LLM):
+    """Streams `reply` word by word. `scripted` overrides it per call, in order."""
+
     backend_name = "fake"
 
-    def __init__(self, reply: str, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        reply: str = "ok",
+        delay: float = 0.0,
+        scripted: list[list[str | ToolCall]] | None = None,
+        completions: list[str] | None = None,
+    ) -> None:
         self._reply = reply
         self._delay = delay
+        self._scripted = list(scripted or [])
+        self._completions = list(completions or [])
         self.prompts: list[list[ChatMessage]] = []
+        self.tools_offered: list[list[ToolSpec] | None] = []
+        self.completion_prompts: list[list[ChatMessage]] = []
 
-    async def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
+    async def stream(
+        self, messages: list[ChatMessage], tools: list[ToolSpec] | None = None
+    ) -> AsyncIterator[str | ToolCall]:
         self.prompts.append(list(messages))
-        for word in self._reply.split(" "):
+        self.tools_offered.append(tools)
+        events: list[str | ToolCall] = (
+            self._scripted.pop(0) if self._scripted else [w + " " for w in self._reply.split(" ")]
+        )
+        for event in events:
             await asyncio.sleep(self._delay)
-            yield word + " "
+            yield event
+
+    async def complete(self, messages: list[ChatMessage], max_tokens: int) -> str:
+        self.completion_prompts.append(list(messages))
+        return self._completions.pop(0) if self._completions else "NONE"
 
 
 class FakeTTS(TextToSpeech):
@@ -73,6 +102,34 @@ class FakeTTS(TextToSpeech):
         for _ in range(3):
             await asyncio.sleep(self._delay)
             yield b"\x00\x00" * 240
+
+
+class WordEmbedder:
+    """Bag-of-words hashed into a vector: shared words mean high cosine, deterministically."""
+
+    dim = 256
+
+    def __init__(self, delay_s: float = 0.0) -> None:
+        self._delay_s = delay_s
+
+    def _embed(self, text: str) -> Vector:
+        v = np.zeros(self.dim, dtype=np.float32)
+        for word in re.findall(r"[a-z]+", text.lower()):
+            v[int(hashlib.md5(word.encode()).hexdigest(), 16) % self.dim] += 1.0
+        norm = float(np.linalg.norm(v))
+        return v / norm if norm else v
+
+    def embed_query(self, text: str) -> Vector:
+        if self._delay_s:
+            time.sleep(self._delay_s)
+        return self._embed(text)
+
+    def embed_passages(self, texts: list[str]) -> list[Vector]:
+        return [self._embed(t) for t in texts]
+
+
+def make_memory(path: Path, embedder: WordEmbedder | None = None) -> MemoryService:
+    return MemoryService(MemoryStore(path), embedder or WordEmbedder(), min_similarity=0.3)
 
 
 class RecordingOutbound:
