@@ -36,6 +36,24 @@ class Settings(BaseSettings):
 
     working_memory_turns: int = 12
 
+    memory_db: Path = Path("data/memory.db")
+    embed_model: str = "BAAI/bge-small-en-v1.5"
+    recall_k: int = 4
+    # 40ms ceiling: recall sits inside the 250ms model budget (see docs/01).
+    recall_budget_ms: int = 40
+    # bge similarities are compressed: question-to-fact matches scored 0.53-0.76 on the eval,
+    # so the floor only drops the clearly unrelated and top-k ranking does the rest (R2).
+    recall_min_similarity: float = 0.5
+    forget_threshold: float = 0.7
+    # Embeddings barely see word order or negation ("tea over coffee" vs "coffee over tea"),
+    # so only near-identical text merges without asking the judge.
+    memory_duplicate_threshold: float = 0.98
+    # Only pairs this similar reach the LLM judge. On the eval, true contradictions scored
+    # 0.64-0.997 and the judge's false supersedes 0.61-0.71: the 1.5B judge says "replaced"
+    # too readily, so the gate does most of the precision work (R2).
+    memory_related_threshold: float = 0.7
+    memory_stale_days: int = 30
+
     models_dir: Path = Path("models")
     results_dir: Path = Path("results")
     host: str = "127.0.0.1"

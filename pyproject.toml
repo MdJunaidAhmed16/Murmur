@@ -19,6 +19,8 @@ dependencies = [
     # ctranslate2 loads cuBLAS/cuDNN at runtime; these wheels supply them without a system CUDA.
     "nvidia-cublas-cu12",
     "nvidia-cudnn-cu12==9.*",
+    "fastembed>=0.9.0",
+    "mcp>=2.3.0",
 ]
 
 [dependency-groups]
