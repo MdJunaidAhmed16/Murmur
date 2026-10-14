@@ -28,15 +28,16 @@ class Settings(BaseSettings):
     tts_handoff: Literal["sentence", "complete"] = "sentence"
     # "clause": the first chunk may end at a comma, so a long opening sentence starts sooner.
     tts_first_chunk: Literal["sentence", "clause"] = "clause"
-    # "cuda" runs Kokoro on the GPU (onnxruntime-gpu, CUDA 12). CPU until R3 measures both.
-    tts_device: Literal["cpu", "cuda"] = "cpu"
+    # Kokoro on the GPU: first audio 1099 -> 212 ms p50 (R3). "cpu" for machines without one.
+    tts_device: Literal["cpu", "cuda"] = "cuda"
 
     vad_threshold: float = 0.5
     # Speculative endpointing (R3). The turn starts after endpoint_silence_ms of silence, but its
     # first audio is held until endpoint_commit_ms: if the user carries on in between, the turn
     # is cancelled unheard and their words merge into the next one. On the clip set, 200 ms cut
-    # 7 of 16 utterances mid-way and 600 ms cut none (longest inner pause 544 ms).
-    endpoint_silence_ms: int = 200
+    # 7 of 16 utterances mid-way and 600 ms cut none (longest inner pause 544 ms). Starting at
+    # 128 ms took p50 time to first audio to 756 ms with no reply ever heard over a pause (R3).
+    endpoint_silence_ms: int = 128
     endpoint_commit_ms: int = 600
     min_speech_ms: int = 250
     # Off if the agent hears itself through laptop speakers and interrupts its own replies.
