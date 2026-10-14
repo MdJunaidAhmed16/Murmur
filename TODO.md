@@ -79,16 +79,16 @@ to cut scope from, not a day to extend.
 ## Days 7–8 — Make it feel real
 
 - [x] Barge-in: stop playback, cancel generation, drop queued synthesis
-- [ ] Partial turns recorded as **spoken**, not generated
-- [ ] Endpointing tuned; both failure modes measured and written down
+- [x] Partial turns recorded as **spoken**, not generated
+- [x] Endpointing tuned; both failure modes measured and written down
 - [x] Sentence-level TTS handoff
 - [x] Tools MCP server (keep it small — 2 or 3 tools)
-- [ ] Optimisation pass against the budget table
+- [x] Optimisation pass against the budget table
 
 ### Gate 3
-- [ ] Barge-in cuts audio within 200ms
-- [ ] Time to first audio inside 800ms at p50
-- [ ] `reports/R3-latency.md` — before and after, per stage
+- [x] Barge-in cuts audio within 200ms
+- [x] Time to first audio inside 800ms at p50
+- [x] `reports/R3-latency.md` — before and after, per stage
 
 ---
 

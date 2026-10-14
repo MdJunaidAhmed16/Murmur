@@ -44,17 +44,19 @@ options in order: int8 model, GPU execution provider, fall back to Piper.
 
 **Endpointing is speculative (day 7).** On 16 clips, 200 ms of silence cut 7
 utterances mid-way and 600 ms cut none, but 600 ms on every turn would eat most of
-the budget. So a turn *starts* at 200 ms and *speaks* no earlier than 600 ms; if the
+the budget. So a turn *starts* at 128 ms and *speaks* no earlier than 600 ms; if the
 user carries on in between, it is cancelled unheard and turn continuation merges
-their words into the next one. Measured in R3.
+their words into the next one. R3: p50 time to first audio 756 ms, and in 62
+measured turns no reply was heard over a user who had only paused.
 
 **GPU TTS: onnxruntime-gpu pinned to 1.26 (day 7).** Kokoro on CPU was 72% of time
 to first audio in R1. onnxruntime-gpu 1.27+ is built for CUDA 13 and ships a
 `libcudnn.so.9` of the same name as the CUDA 12 one ctranslate2 loads for Whisper;
 1.26 is the last CUDA 12 build, so STT and TTS share one set of CUDA 12 wheels. It
 replaces the CPU `onnxruntime` package (a uv override) and still provides the CPU
-provider that VAD and embeddings use. `MURMUR_TTS_DEVICE` picks the device; the
-default stays CPU until R3 measures both. Revisit when ctranslate2 ships for CUDA 13.
+provider that VAD and embeddings use. Measured in R3: first audio 1099 → 212 ms
+p50, so GPU is the default (`MURMUR_TTS_DEVICE=cpu` for machines without one).
+Revisit when ctranslate2 ships for CUDA 13.
 
 **Retrieval: no LlamaIndex (day 4).** One user's store is a few hundred facts. A
 numpy dot product over them is sub-millisecond; the query embedding (~6 ms) is the
