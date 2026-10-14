@@ -1,6 +1,7 @@
 """FastAPI app: the demo page and the audio WebSocket."""
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from murmur.audio.vad import SileroVAD
 from murmur.config import Settings, get_settings
 from murmur.llm import LLM, build_llm
 from murmur.mcp_servers.memory import build_memory_server
+from murmur.mcp_servers.tools import build_tools_server
 from murmur.memory import MemoryService, open_memory
 from murmur.pipeline.metrics import TurnLog
 from murmur.pipeline.orchestrator import Session
@@ -29,8 +31,9 @@ from murmur.tts.local import KokoroTTS
 
 log = structlog.get_logger()
 STATIC_DIR = Path(__file__).parent / "static"
-# The model sees only forget; recall is injected into the prompt, not called as a tool.
-AGENT_TOOLS = {"forget"}
+# Recall is injected into the prompt, not called as a tool. Each of these is further gated on
+# the user's words (agent/tools.py TRIGGERS).
+AGENT_TOOLS = {"forget", "current_time", "calculate"}
 
 
 @dataclass
@@ -51,7 +54,9 @@ def load_models(settings: Settings) -> tuple[WhisperSTT, KokoroTTS, MemoryServic
     stt = WhisperSTT(
         settings.stt_model, settings.stt_device, settings.stt_compute_type, settings.models_dir
     )
-    tts = KokoroTTS(settings.models_dir, settings.tts_voice, settings.tts_speed)
+    tts = KokoroTTS(
+        settings.models_dir, settings.tts_voice, settings.tts_speed, settings.tts_device
+    )
     memory = open_memory(settings)
     # The first call pays for kernel loading and allocation; keep it out of turn one's numbers.
     stt.warm_up()
@@ -83,8 +88,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stt, tts, memory = await asyncio.to_thread(load_models, settings)
         llm = build_llm(settings)
         jobs = MemoryJobs.from_settings(llm, memory, settings)
-        server = build_memory_server(memory, settings.forget_threshold, before_forget=jobs.flush)
-        async with Client(server) as client, asyncio.TaskGroup() as background:
+        memory_server = build_memory_server(
+            memory, settings.forget_threshold, before_forget=jobs.flush
+        )
+        tools_server = build_tools_server(settings.timezone)
+        async with (
+            Client(memory_server) as memory_client,
+            Client(tools_server) as tools_client,
+            asyncio.TaskGroup() as background,
+        ):
             worker = background.create_task(jobs.run())
             stale = await jobs.decay()
             app.state.engines = Engines(
@@ -94,7 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 llm=llm,
                 memory=memory,
                 memory_jobs=jobs,
-                tools=await McpToolBox.connect(client, AGENT_TOOLS),
+                tools=await McpToolBox.connect([memory_client, tools_client], AGENT_TOOLS),
                 turn_log=TurnLog(settings.results_dir),
                 session_lock=asyncio.Lock(),
             )
@@ -103,6 +115,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 url=f"http://{settings.host}:{settings.port}",
                 memories=len(memory.all(include_superseded=False)),
                 decayed=stale,
+                tts_providers=tts.providers,
             )
             yield
             worker.cancel()
@@ -125,6 +138,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await _serve_session(websocket, engines)
 
     return app
+
+
+def _parse_control(text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def _serve_session(websocket: WebSocket, engines: Engines) -> None:
@@ -158,6 +179,8 @@ async def _serve_session(websocket: WebSocket, engines: Engines) -> None:
                 break
             if (data := message.get("bytes")) is not None:
                 await session.handle_frame(data)
+            elif (text := message.get("text")) is not None:
+                await session.handle_control(_parse_control(text))
     except WebSocketDisconnect:
         pass
     finally:

@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const STAGES = ["endpoint", "stt_final", "memory_recall", "llm_first_token", "llm_first_sentence", "tts_first_audio", "time_to_first_audio"];
+const STAGES = ["endpoint", "stt_final", "memory_recall", "llm_first_token", "llm_first_sentence", "tts_first_audio", "time_to_first_audio", "barge_in"];
 
 let ws, captureCtx, playbackCtx, playbackNode, micStream;
 let assistantLine = null;
@@ -57,6 +57,10 @@ function onEvent(msg) {
       if (!assistantLine) assistantLine = addLine("assistant", "");
       assistantLine.textContent += msg.text;
       return;
+    case "pause":
+    case "resume":
+      playbackNode?.port.postMessage(msg.type);
+      return;
     case "clear":
       playbackNode?.port.postMessage("clear");
       // The server clears defensively; only a reply still playing was actually cut off.
@@ -90,8 +94,13 @@ async function startAudio(config) {
   await playbackCtx.audioWorklet.addModule("/static/worklets.js");
   playbackNode = new AudioWorkletNode(playbackCtx, "playback", { outputChannelCount: [1] });
   playbackNode.port.onmessage = (e) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if ("cleared" in e.data) {
+      ws.send(JSON.stringify({ type: "playback", discarded_samples: e.data.cleared }));
+      return;
+    }
     audioPlaying = e.data.playing;
-    if (ws.readyState === WebSocket.OPEN) setStatus(e.data.playing ? "Speaking" : "Listening", "live");
+    setStatus(e.data.playing ? "Speaking" : "Listening", "live");
   };
   playbackNode.connect(playbackCtx.destination);
 
