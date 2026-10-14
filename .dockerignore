@@ -1,0 +1,17 @@
+.git
+.venv
+.venv-vllm
+models
+results
+data
+clips
+reports
+docs
+tests
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.env
+*.wav
+*.db

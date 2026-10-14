@@ -7,6 +7,7 @@ from faster_whisper import download_model
 from huggingface_hub import snapshot_download
 
 from murmur.config import get_settings
+from murmur.memory.embed import FastEmbedder
 
 FILES = {
     "silero_vad.onnx": "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
@@ -34,9 +35,15 @@ def main() -> None:
     print(f"fetch whisper {settings.stt_model}")
     download_model(settings.stt_model, cache_dir=str(settings.models_dir))
 
-    # vLLM reads from the Hugging Face cache, so the LLM goes there rather than models/.
-    print(f"fetch {settings.llm_model}")
-    snapshot_download(settings.llm_model)
+    # Fetched now so the first visitor's recall does not wait on a download.
+    print(f"fetch {settings.embed_model}")
+    FastEmbedder(settings.embed_model, settings.models_dir).embed_query("warm up")
+
+    if settings.backend == "local":
+        # vLLM reads from the Hugging Face cache, so the LLM goes there rather than models/.
+        # The hosted image skips it: 3 GB it would never load.
+        print(f"fetch {settings.llm_model}")
+        snapshot_download(settings.llm_model)
     print("done")
 
 
