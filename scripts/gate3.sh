@@ -87,6 +87,8 @@ MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause MURMUR_ENDPOINT_COMMIT_MS=0
   run_config gpu clips/*.wav
 MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause MURMUR_ENDPOINT_COMMIT_MS=600 \
   run_config final clips/*.wav
+MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause MURMUR_ENDPOINT_COMMIT_MS=600 \
+  MURMUR_ENDPOINT_SILENCE_MS=128 run_config tuned clips/*.wav clips/*.wav
 
 echo "== 6. barge-in and tools on the final configuration"
 C=results/gate3-clips
@@ -97,6 +99,19 @@ MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause MURMUR_ENDPOINT_COMMIT_MS=6
   run_config tools $C/t1-time.wav $C/t2-calc.wav $C/t3-calc.wav
 if wanted tools; then
   grep -h '"tool_call"' "$R/tools/app.log" | cut -c1-300 || echo "no tool calls logged"
+fi
+
+echo "== 7. hosted backend (Claude via OpenRouter), same clips and settings as tuned"
+# Only with a key: export MURMUR_OPENROUTER_API_KEY, optionally MURMUR_HOSTED_MODEL.
+if [ -n "${MURMUR_OPENROUTER_API_KEY:-}" ]; then
+  MURMUR_BACKEND=hosted MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause \
+    MURMUR_ENDPOINT_COMMIT_MS=600 MURMUR_ENDPOINT_SILENCE_MS=128 \
+    run_config hosted clips/*.wav clips/*.wav
+  if wanted hosted; then
+    grep -h '"tool_call"' "$R/hosted/app.log" | cut -c1-300 || true
+  fi
+else
+  echo "   skipped: no MURMUR_OPENROUTER_API_KEY"
 fi
 
 echo "== done"

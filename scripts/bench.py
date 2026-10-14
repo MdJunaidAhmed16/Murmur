@@ -69,9 +69,13 @@ def main() -> int:
         mine = [t for t in turns if t["backend"] == backend]
         by_backend[backend] = {}
         for stage in STAGES:
-            # Barge-in turns stop early and would skew the other stages; the barge-in stage
-            # exists only on them.
-            rows = [t for t in mine if t["barge_in"] == (stage == "barge_in")]
+            # Barge-in turns stop early and would skew the other stages. The barge-in stage
+            # counts only cuts of audio the user could hear: a turn cancelled before its first
+            # sample (an early endpoint) takes the slower confirm path and cuts nothing.
+            if stage == "barge_in":
+                rows = [t for t in mine if t["barge_in"] and t["spoken_chars"] > 0]
+            else:
+                rows = [t for t in mine if not t["barge_in"]]
             by_backend[backend][stage] = percentiles(
                 [t["ms"][stage] for t in rows if t["ms"].get(stage) is not None]
             )
@@ -85,6 +89,7 @@ def main() -> int:
             "platform": platform.platform(),
             "gpu": gpu_name(),
             "llm_model": settings.llm_model,
+            "hosted_model": settings.hosted_model,
             "stt_model": settings.stt_model,
             "stt_device": settings.stt_device,
             "tts_voice": settings.tts_voice,

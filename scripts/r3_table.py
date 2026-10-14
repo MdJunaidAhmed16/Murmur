@@ -9,7 +9,7 @@ from pathlib import Path
 
 from murmur.config import get_settings
 
-CONFIGS = ["baseline", "clause", "gpu", "final", "tuned"]
+CONFIGS = ["baseline", "clause", "gpu", "final", "tuned", "hosted"]
 STAGES = [
     ("endpoint", "Endpointing"),
     ("stt_final", "Transcription (final)"),
@@ -24,8 +24,11 @@ STAGES = [
 def load(path: Path) -> dict[str, dict[str, float | None]] | None:
     if not path.exists():
         return None
-    backends = json.loads(path.read_text())["backends"]
-    return backends.get("local")
+    # Each run uses one backend: local for most, hosted for the hosted run.
+    backends: dict[str, dict[str, dict[str, float | None]]] = json.loads(path.read_text())[
+        "backends"
+    ]
+    return next(iter(backends.values()), None)
 
 
 def cell(stats: dict[str, dict[str, float | None]] | None, stage: str) -> str:
