@@ -1,11 +1,19 @@
-"""Plays WAV clips into the running server as if spoken into the browser, one turn per clip.
+"""Plays WAV clips into the running server as if spoken into the browser.
 
-uv run python scripts/replay.py clips/*.wav
+    uv run python scripts/replay.py clips/*.wav                      # one turn per clip
+    uv run python scripts/replay.py --interrupt-after 1.5 ask.wav cut.wav ...
+
+With --interrupt-after, clips go in pairs: the second starts that many seconds after the
+agent's reply to the first starts playing — a scripted barge-in. A virtual player stands in
+for the browser's: it plays received audio in real time, honours pause/resume, and answers a
+clear with the number of samples it dropped, exactly as the page does.
 """
 
+import argparse
 import asyncio
 import json
 import sys
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -20,6 +28,44 @@ from murmur.config import get_settings
 TRAILING_SILENCE_S = 1.0
 REPLY_TIMEOUT_S = 30.0
 IDLE_S = 2.0
+
+
+class VirtualPlayer:
+    """The browser playback worklet, as arithmetic: a queue drained at the sample rate."""
+
+    def __init__(self, rate: int) -> None:
+        self._rate = rate
+        self._queued = 0.0
+        self._paused = False
+        self._last = time.monotonic()
+
+    def _advance(self) -> None:
+        now = time.monotonic()
+        if not self._paused:
+            self._queued = max(0.0, self._queued - (now - self._last) * self._rate)
+        self._last = now
+
+    @property
+    def playing(self) -> bool:
+        self._advance()
+        return self._queued > 0 and not self._paused
+
+    def receive(self, samples: int) -> None:
+        self._advance()
+        self._queued += samples
+
+    def pause(self) -> None:
+        self._advance()
+        self._paused = True
+
+    def resume(self) -> None:
+        self._advance()
+        self._paused = False
+
+    def clear(self) -> int:
+        self._advance()
+        dropped, self._queued, self._paused = int(self._queued), 0.0, False
+        return dropped
 
 
 def load_clip(path: Path) -> bytes:
@@ -40,7 +86,8 @@ def load_clip(path: Path) -> bytes:
     return audio[:usable].tobytes()
 
 
-async def play(ws: Any, pcm: bytes) -> None:
+async def play(ws: Any, pcm: bytes, delay_s: float = 0.0) -> None:
+    await asyncio.sleep(delay_s)
     frame_bytes = FRAME_SAMPLES * 2
     for i in range(0, len(pcm), frame_bytes):
         await ws.send(pcm[i : i + frame_bytes])
@@ -48,16 +95,21 @@ async def play(ws: Any, pcm: bytes) -> None:
         await asyncio.sleep(FRAME_MS / 1000)
 
 
-async def run_clip(ws: Any, pcm: bytes) -> list[dict[str, Any]]:
+async def run_clip(
+    ws: Any,
+    player: VirtualPlayer,
+    pcm: bytes,
+    interrupt: tuple[bytes, float] | None = None,
+) -> list[dict[str, Any]]:
     """Returns every turn record the clip produced; pauses can split one clip into several."""
-    sender = asyncio.create_task(play(ws, pcm))
+    senders = [asyncio.create_task(play(ws, pcm))]
     turns: list[dict[str, Any]] = []
     reply: list[str] = []
     audio_bytes = 0
     in_flight = 0
     while True:
-        # Once the clip is fully sent and no turn is running, a short quiet spell means done.
-        idle = sender.done() and in_flight == 0
+        # Once everything is sent, no turn is running and nothing is audible, quiet means done.
+        idle = all(s.done() for s in senders) and in_flight == 0 and not player.playing
         try:
             message = await asyncio.wait_for(ws.recv(), timeout=IDLE_S if idle else REPLY_TIMEOUT_S)
         except TimeoutError:
@@ -65,42 +117,65 @@ async def run_clip(ws: Any, pcm: bytes) -> list[dict[str, Any]]:
                 return turns
             raise
         if isinstance(message, bytes):
+            if audio_bytes == 0 and interrupt is not None:
+                cut_pcm, after_s = interrupt
+                senders.append(asyncio.create_task(play(ws, cut_pcm, after_s)))
+                print(f"  (interrupting {after_s}s into the reply)")
+                interrupt = None
             audio_bytes += len(message)
+            player.receive(len(message) // 2)
             continue
         event = json.loads(message)
-        if event["type"] == "user":
+        kind = event["type"]
+        if kind == "user":
             in_flight += 1
             print(f"  heard:   {event['text']}")
-        elif event["type"] == "assistant_delta":
+        elif kind == "assistant_delta":
             reply.append(event["text"])
-        elif event["type"] == "error":
+        elif kind == "pause":
+            player.pause()
+        elif kind == "resume":
+            player.resume()
+        elif kind == "clear":
+            dropped = player.clear()
+            await ws.send(json.dumps({"type": "playback", "discarded_samples": dropped}))
+        elif kind == "error":
             raise RuntimeError(event["message"])
-        elif event["type"] == "metrics":
+        elif kind == "metrics":
             in_flight -= 1
             print(f"  replied: {''.join(reply).strip()}")
-            print(f"  audio:   {audio_bytes / 2 / 24_000:.1f}s")
+            print(f"  audio:   {audio_bytes / 2 / 24_000:.1f}s sent")
             print(f"  ms:      {event['ms']}")
             if event["barge_in"]:
-                print("  barge-in: cut off (did endpointing split one utterance?)")
+                print(f"  barge-in: heard {event['spoken_chars']} chars before the cut")
             turns.append(event)
             reply, audio_bytes = [], 0
 
 
-async def main(paths: list[Path]) -> int:
+async def main(paths: list[Path], interrupt_after: float | None) -> int:
     settings = get_settings()
     async with websockets.connect(f"ws://{settings.host}:{settings.port}/ws") as ws:
         config = json.loads(await ws.recv())
         assert config["type"] == "config", config
-        for path in paths:
-            print(path.name)
-            turns = await run_clip(ws, load_clip(path))
-            if len(turns) > 1:
-                print(f"  split into {len(turns)} turns")
+        player = VirtualPlayer(config["output_sample_rate"])
+        if interrupt_after is None:
+            for path in paths:
+                print(path.name)
+                turns = await run_clip(ws, player, load_clip(path))
+                if len(turns) > 1:
+                    print(f"  split into {len(turns)} turns")
+            return 0
+        if len(paths) % 2:
+            raise SystemExit("--interrupt-after takes clips in pairs: ask, interruption")
+        for ask, cut in zip(paths[::2], paths[1::2], strict=True):
+            print(f"{ask.name} -> {cut.name}")
+            await run_clip(ws, player, load_clip(ask), (load_clip(cut), interrupt_after))
     return 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(2)
-    sys.exit(asyncio.run(main([Path(p) for p in sys.argv[1:]])))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("clips", nargs="+", type=Path)
+    parser.add_argument("--interrupt-after", type=float, default=None)
+    args = parser.parse_args()
+    sys.exit(asyncio.run(main(args.clips, args.interrupt_after)))
