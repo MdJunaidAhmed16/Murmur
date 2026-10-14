@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 from murmur.agent.loop import Agent
 from murmur.agent.memory_jobs import MemoryJobs
@@ -27,14 +28,16 @@ def make_session(
     llm: FakeLLM,
     tts: FakeTTS,
     memory: MemoryService | None = None,
+    **overrides: Any,
 ) -> tuple[Session, Agent, RecordingOutbound]:
-    settings = Settings(
-        _env_file=None,  # type: ignore[call-arg]
-        min_speech_ms=64,
-        endpoint_silence_ms=64,
-        stt_partial_interval_ms=0,
-        results_dir=tmp_path,
-    )
+    config: dict[str, Any] = {
+        "min_speech_ms": 64,
+        "endpoint_silence_ms": 64,
+        "endpoint_commit_ms": 0,
+        "stt_partial_interval_ms": 0,
+        "results_dir": tmp_path,
+    }
+    settings = Settings(_env_file=None, **(config | overrides))  # type: ignore[call-arg]
     memory = memory or make_memory(tmp_path / "memory.db")
     agent = Agent(llm, max_turns=4)
     out = RecordingOutbound()
@@ -61,9 +64,15 @@ async def speak(session: Session, speech_frames: int = 5, silence_frames: int = 
 
 
 async def wait_turn(session: Session) -> None:
+    """The turn, its audible tail, and the settle that records what was heard."""
     turn = session._turn
     assert turn is not None
     await asyncio.wait_for(asyncio.shield(turn), timeout=2)
+    await asyncio.wait_for(session.settled(), timeout=2)
+
+
+def records(tmp_path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in (tmp_path / "turns.jsonl").read_text().splitlines()]
 
 
 async def test_full_turn_speaks_and_records(tmp_path: Path) -> None:
@@ -83,16 +92,16 @@ async def test_full_turn_speaks_and_records(tmp_path: Path) -> None:
     assert stt.streams[0].frames >= 5
     assert agent.history[-1].content == "It is noon. Have a good lunch."
 
-    record = json.loads((tmp_path / "turns.jsonl").read_text())
+    [record] = records(tmp_path)
     assert record["barge_in"] is False
     assert record["ms"]["time_to_first_audio"] is not None
     assert record["spoken_chars"] == len("It is noon. Have a good lunch.")
 
 
-async def test_barge_in_cancels_turn_and_keeps_only_spoken_text(tmp_path: Path) -> None:
+async def test_barge_in_keeps_only_what_the_browser_played(tmp_path: Path) -> None:
     stt = FakeSTT(["tell me a story", "stop"])
     llm = FakeLLM("Once upon a time there was a fox. It lived in a wood. The end.", delay=0.01)
-    tts = FakeTTS(delay=0.05)
+    tts = FakeTTS(delay=0.05)  # 3 chunks of 240 samples per sentence
     session, agent, out = make_session(tmp_path, stt, llm, tts)
 
     await speak(session)
@@ -101,17 +110,58 @@ async def test_barge_in_cancels_turn_and_keeps_only_spoken_text(tmp_path: Path) 
     await asyncio.wait_for(out.wait_for_audio(3), timeout=2)  # first sentence fully sent
 
     await speak(session, silence_frames=0)
-
     assert first_turn.cancelled()
     assert out.of_type("clear")
-    record = json.loads((tmp_path / "turns.jsonl").read_text().splitlines()[0])
+    # The browser had played half of the first sentence's 720 samples.
+    await session.handle_control({"type": "playback", "discarded_samples": 360})
+    await asyncio.wait_for(session.settled(), timeout=2)
+
+    record = records(tmp_path)[0]
     assert record["barge_in"] is True
+    assert record["ms"]["barge_in"] is not None
+    assert agent.history[-1].content == "Once upon a time"  # 8 words, half of them played
+    await session.close()
+
+
+async def test_without_a_report_heard_text_is_estimated_from_time(tmp_path: Path) -> None:
+    stt = FakeSTT(["tell me a story", "stop"])
+    llm = FakeLLM("Once upon a time there was a fox. It lived in a wood.", delay=0.01)
+    session, agent, out = make_session(tmp_path, stt, llm, FakeTTS(delay=0.05))
+
+    await speak(session)
+    await asyncio.wait_for(out.wait_for_audio(3), timeout=2)
+    await speak(session, silence_frames=0)  # replay client: never answers the clear
+    await asyncio.wait_for(session.settled(), timeout=2)
+
+    # Wall-clock since first audio covers everything sent, so the whole first sentence counts.
     assert agent.history[-1].content == "Once upon a time there was a fox."
     await session.close()
 
 
+async def test_cough_during_playback_pauses_then_resumes(tmp_path: Path) -> None:
+    stt = FakeSTT(["tell me a story"])
+    llm = FakeLLM("Once upon a time there was a fox. It lived in a wood.", delay=0.01)
+    session, _, out = make_session(
+        tmp_path, stt, llm, FakeTTS(delay=0.05), min_speech_ms=128, barge_in_onset_ms=32
+    )
+
+    await speak(session, speech_frames=5)
+    turn = session._turn
+    assert turn is not None
+    await asyncio.wait_for(out.wait_for_audio(1), timeout=2)
+
+    await speak(session, speech_frames=1, silence_frames=1)  # one frame of noise
+
+    assert [e["type"] for e in out.events if e["type"] in {"pause", "resume", "clear"}] == [
+        "pause",
+        "resume",
+    ]
+    assert not turn.done()  # the reply carries on
+    await session.close()
+
+
 async def test_speech_clears_browser_audio_after_turn_finished_sending(tmp_path: Path) -> None:
-    # The turn is done once audio is sent, but the browser may still be playing it.
+    # The turn is done once its audio has (by estimate) played; the browser may lag behind.
     stt = FakeSTT(["tell me a story", "wait"])
     session, _, out = make_session(
         tmp_path, stt, FakeLLM("A long reply. With two parts."), FakeTTS()
@@ -125,6 +175,17 @@ async def test_speech_clears_browser_audio_after_turn_finished_sending(tmp_path:
 
     assert out.of_type("clear")
     await session.close()
+
+
+async def test_first_audio_waits_for_the_commit_point(tmp_path: Path) -> None:
+    session, _, _ = make_session(
+        tmp_path, FakeSTT(["hi there"]), FakeLLM("Hello."), FakeTTS(), endpoint_commit_ms=300
+    )
+
+    await speak(session)
+    await wait_turn(session)
+
+    assert records(tmp_path)[0]["ms"]["time_to_first_audio"] >= 300
 
 
 async def test_early_endpoint_carries_words_into_the_next_turn(tmp_path: Path) -> None:
@@ -160,9 +221,9 @@ async def test_recalled_memories_reach_the_prompt(tmp_path: Path) -> None:
     assert out.of_type("recalled") == [
         {"type": "recalled", "memories": ["Has a sister called Afifa"]}
     ]
-    record = out.of_type("metrics")
-    assert record and record[0]["memories_retrieved"] == 1
-    assert record[0]["ms"]["memory_recall"] is not None
+    [record] = out.of_type("metrics")
+    assert record["memories_retrieved"] == 1
+    assert record["ms"]["memory_recall"] is not None
 
 
 async def test_recall_over_budget_answers_without_memories(tmp_path: Path) -> None:
@@ -179,7 +240,7 @@ async def test_recall_over_budget_answers_without_memories(tmp_path: Path) -> No
 
     assert "Afifa" not in llm.prompts[0][0].content
     assert out.audio_chunks > 0  # the turn still spoke
-    assert json.loads((tmp_path / "turns.jsonl").read_text())["ms"]["memory_recall"] < 100
+    assert records(tmp_path)[0]["ms"]["memory_recall"] < 100
 
 
 async def test_noise_without_words_is_not_a_turn(tmp_path: Path) -> None:

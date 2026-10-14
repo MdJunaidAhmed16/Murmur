@@ -4,14 +4,60 @@ from murmur.agent.loop import Agent
 from murmur.audio.vad import EndpointDetector, VadEvent
 from murmur.llm.base import ToolCall, ToolSpec
 from murmur.pipeline.metrics import TurnTimer
+from murmur.pipeline.playback import PlaybackLedger
 from murmur.tts.text import SentenceChunker
 from tests.fakes import FakeLLM
 
 
 def test_endpoint_needs_sustained_speech_then_silence() -> None:
-    detector = EndpointDetector(endpoint_silence_ms=96, min_speech_ms=64)  # 3 and 2 frames
+    # 3 and 2 frames; onset equal to min_speech means no separate onset.
+    detector = EndpointDetector(endpoint_silence_ms=96, min_speech_ms=64, onset_ms=64)
     events = [detector.update(s) for s in [True, True, False, False, True, False, False, False]]
     assert events == [None, VadEvent.SPEECH_START, None, None, None, None, None, VadEvent.ENDPOINT]
+
+
+def test_onset_comes_first_and_aborts_if_speech_never_confirms() -> None:
+    detector = EndpointDetector(endpoint_silence_ms=96, min_speech_ms=128, onset_ms=64)
+    cough = [detector.update(s) for s in [True, True, True, False]]
+    assert cough == [None, VadEvent.ONSET, None, VadEvent.ABORT]
+    talk = [detector.update(s) for s in [True, True, True, True, False]]
+    assert talk == [None, VadEvent.ONSET, None, VadEvent.SPEECH_START, None]
+
+
+def test_chunker_cuts_the_first_long_sentence_at_a_clause() -> None:
+    chunker = SentenceChunker(first_clause=True)
+    out: list[str] = []
+    for delta in [
+        "Well, ",
+        "the quickest way to get there, ",
+        "honestly, is the metro. ",
+        "Next, ",
+    ]:
+        out += chunker.feed(delta)
+    out += chunker.feed("take line two, then walk. ")
+    # "Well," is too short to stand alone; later chunks stay whole sentences.
+    assert out == [
+        "Well, the quickest way to get there,",
+        "honestly, is the metro.",
+        "Next, take line two, then walk.",
+    ]
+
+
+def test_playback_ledger_maps_position_to_words() -> None:
+    ledger = PlaybackLedger(sample_rate=24_000, session_offset=1000)
+    ledger.begin("One two three four.")
+    ledger.add_audio(400)
+    ledger.begin("Five six.")
+    ledger.add_audio(200)
+
+    assert ledger.heard_text(1000) == ""
+    assert ledger.heard_text(1200) == "One two"
+    assert ledger.heard_text(1400) == "One two three four."
+    assert ledger.heard_text(1450) == "One two three four."  # a quarter of two words rounds down
+    assert ledger.heard_text(1600) == "One two three four. Five six."
+    assert ledger.sent_samples == 600
+    ledger.begin("Seven.")  # synthesis started, no audio sent yet
+    assert ledger.heard_text(1600) == "One two three four. Five six."
 
 
 def test_chunker_hands_off_at_sentence_boundaries() -> None:

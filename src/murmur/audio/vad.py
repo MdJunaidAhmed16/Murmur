@@ -42,28 +42,49 @@ class SileroVAD:
 
 
 class VadEvent(Enum):
+    ONSET = auto()
+    ABORT = auto()
     SPEECH_START = auto()
     ENDPOINT = auto()
 
 
 class EndpointDetector:
-    """Counts frames, not wall-clock, so replayed audio behaves exactly like live audio."""
+    """Counts frames, not wall-clock, so replayed audio behaves exactly like live audio.
 
-    def __init__(self, endpoint_silence_ms: int, min_speech_ms: int) -> None:
+    Two thresholds for the start of speech: ONSET after onset_ms, cheap to act on and easy to
+    take back (pause playback), and SPEECH_START after min_speech_ms, which commits to a turn.
+    ABORT means an onset never became speech: a cough, a click, or the agent's own echo.
+    """
+
+    def __init__(self, endpoint_silence_ms: int, min_speech_ms: int, onset_ms: int) -> None:
         self._silence_frames_needed = max(1, endpoint_silence_ms // FRAME_MS)
         self._speech_frames_needed = max(1, min_speech_ms // FRAME_MS)
+        self._onset_frames = max(1, onset_ms // FRAME_MS)
         self.in_speech = False
         self._speech_run = 0
         self._silence_run = 0
+
+    @property
+    def _onset_fired(self) -> bool:
+        return self._onset_frames <= self._speech_run < self._speech_frames_needed
 
     def update(self, is_speech: bool) -> VadEvent | None:
         if is_speech:
             self._silence_run = 0
             self._speech_run += 1
-            if not self.in_speech and self._speech_run >= self._speech_frames_needed:
+            if self.in_speech:
+                return None
+            if self._speech_run >= self._speech_frames_needed:
                 self.in_speech = True
                 return VadEvent.SPEECH_START
+            if self._speech_run == self._onset_frames:
+                return VadEvent.ONSET
             return None
+
+        if not self.in_speech:
+            aborted = self._onset_fired
+            self._speech_run = 0
+            return VadEvent.ABORT if aborted else None
 
         self._speech_run = 0
         if self.in_speech:

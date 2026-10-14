@@ -20,6 +20,7 @@ STAGES = [
     "llm_first_sentence",
     "tts_first_audio",
     "time_to_first_audio",
+    "barge_in",
 ]
 PACKAGES = ["faster-whisper", "ctranslate2", "kokoro-onnx", "onnxruntime", "openai", "fastapi"]
 
@@ -57,12 +58,15 @@ def main() -> int:
     turns = [json.loads(line) for line in turns_path.read_text().splitlines() if line.strip()]
     by_backend: dict[str, dict[str, dict[str, float | None]]] = {}
     for backend in sorted({t["backend"] for t in turns}):
-        # Barge-in turns stop early; they would flatter tts and skew time_to_first_audio.
-        rows = [t for t in turns if t["backend"] == backend and not t["barge_in"]]
-        by_backend[backend] = {
-            stage: percentiles([t["ms"][stage] for t in rows if t["ms"].get(stage) is not None])
-            for stage in STAGES
-        }
+        mine = [t for t in turns if t["backend"] == backend]
+        by_backend[backend] = {}
+        for stage in STAGES:
+            # Barge-in turns stop early and would skew the other stages; the barge-in stage
+            # exists only on them.
+            rows = [t for t in mine if t["barge_in"] == (stage == "barge_in")]
+            by_backend[backend][stage] = percentiles(
+                [t["ms"][stage] for t in rows if t["ms"].get(stage) is not None]
+            )
 
     report = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),

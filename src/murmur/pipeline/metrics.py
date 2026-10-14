@@ -17,6 +17,8 @@ Mark = Literal[
     "llm_first_token",
     "tts_request",
     "tts_first_audio",
+    "barge_in_onset",
+    "barge_in_cut",
 ]
 
 
@@ -39,6 +41,12 @@ class TurnTimer:
         # First mark wins: later chunks of the same stage must not move "first audio".
         self.marks.setdefault(name, now_ms() if at is None else at)
 
+    def unmark(self, *names: Mark) -> None:
+        # For a start that turned out false (a cough during playback), so a later real one
+        # is timed from its own beginning.
+        for name in names:
+            self.marks.pop(name, None)
+
     def _span(self, start: str, end: str) -> int | None:
         if start in self.marks and end in self.marks:
             return round(self.marks[end] - self.marks[start])
@@ -55,6 +63,9 @@ class TurnTimer:
             "tts_first_audio": self._span("tts_request", "tts_first_audio"),
             # Measured from the user's last speech frame, so endpointing counts against us.
             "time_to_first_audio": self._span("speech_end", "tts_first_audio"),
+            # First speech frame of the interruption to the server telling the browser to stop.
+            # Browser-side latency (one WebSocket hop, one 128-sample render quantum) is not in it.
+            "barge_in": self._span("barge_in_onset", "barge_in_cut"),
         }
 
     def record(self) -> dict[str, Any]:
