@@ -26,7 +26,9 @@ from murmur.config import get_settings
 
 # Long enough for endpointing to fire and the reply to finish before the next clip.
 TRAILING_SILENCE_S = 1.0
-REPLY_TIMEOUT_S = 30.0
+# A turn's metrics arrive after its audio has played, and a long reply can be a minute of
+# audio with nothing on the wire while the browser plays out the buffer.
+REPLY_TIMEOUT_S = 120.0
 IDLE_S = 2.0
 
 
@@ -46,9 +48,9 @@ class VirtualPlayer:
         self._last = now
 
     @property
-    def playing(self) -> bool:
+    def remaining_s(self) -> float:
         self._advance()
-        return self._queued > 0 and not self._paused
+        return self._queued / self._rate
 
     def receive(self, samples: int) -> None:
         self._advance()
@@ -108,10 +110,12 @@ async def run_clip(
     audio_bytes = 0
     in_flight = 0
     while True:
-        # Once everything is sent, no turn is running and nothing is audible, quiet means done.
-        idle = all(s.done() for s in senders) and in_flight == 0 and not player.playing
+        # Once everything is sent and no turn is running, quiet for the rest of the playback plus
+        # a margin means done.
+        idle = all(s.done() for s in senders) and in_flight == 0
+        wait_s = IDLE_S + player.remaining_s if idle else REPLY_TIMEOUT_S
         try:
-            message = await asyncio.wait_for(ws.recv(), timeout=IDLE_S if idle else REPLY_TIMEOUT_S)
+            message = await asyncio.wait_for(ws.recv(), timeout=wait_s)
         except TimeoutError:
             if idle:
                 return turns

@@ -2,7 +2,9 @@
 # Gate 3 end to end: installs GPU TTS, measures four configurations, barge-in and tools.
 # Needs the GPU to itself. Roughly 20-30 minutes, plus ~0.5 GB of downloads on the first run.
 #
-#   bash scripts/gate3.sh            # then: uv run python scripts/r3_table.py
+#   bash scripts/gate3.sh                                # everything
+#   SKIP_SETUP=1 ONLY="baseline clause" bash scripts/gate3.sh   # rerun some measurements
+#   uv run python scripts/r3_table.py                    # the table
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
@@ -28,8 +30,13 @@ wait_for() {  # wait_for <file> <pattern> <seconds>
   return 1
 }
 
+wanted() {  # ONLY="a b" limits which configurations run
+  [ -z "${ONLY:-}" ] || [[ " $ONLY " == *" $1 "* ]]
+}
+
 run_config() {  # run_config <name> <replay args...>; MURMUR_* settings come from the environment
   local name=$1; shift
+  wanted "$name" || return 0
   local dir="$R/$name"
   rm -rf "$dir"; mkdir -p "$dir"
   echo "== $name: $(env | grep '^MURMUR_' | sort | tr '\n' ' ')"
@@ -46,18 +53,26 @@ run_config() {  # run_config <name> <replay args...>; MURMUR_* settings come fro
   echo "   vram: $(cat "$dir/vram.txt")"
 }
 
-echo "== 1. sync: installs onnxruntime-gpu 1.26 (CUDA 12)"
-uv sync
+# SKIP_SETUP=1 reruns only the measurements (steps 4-6) once install and smoke have passed.
+if [ -z "${SKIP_SETUP:-}" ]; then
+  echo "== 1. sync: installs onnxruntime-gpu 1.26 (CUDA 12)"
+  uv sync
 
-echo "== 2. TTS smoke, CPU then GPU"
-MURMUR_TTS_DEVICE=cpu make smoke 2>&1 | grep -vi warning | tee "$R/smoke-cpu.txt" \
-  || echo "!! CPU smoke failed"
-MURMUR_TTS_DEVICE=cuda make smoke 2>&1 | grep -vi warning | tee "$R/smoke-cuda.txt" \
-  || echo "!! GPU smoke failed: the gpu/final configs will fail too; see $R/smoke-cuda.txt"
+  echo "== 2. TTS smoke, CPU then GPU"
+  MURMUR_TTS_DEVICE=cpu make smoke 2>&1 | grep -vi warning | tee "$R/smoke-cpu.txt" \
+    || echo "!! CPU smoke failed"
+  MURMUR_TTS_DEVICE=cuda make smoke 2>&1 | grep -vi warning | tee "$R/smoke-cuda.txt" \
+    || echo "!! GPU smoke failed: the gpu/final configs will fail too; see $R/smoke-cuda.txt"
 
-echo "== 3. endpointing sweep (VAD only)"
-PYTHONPATH=scripts MURMUR_RESULTS_DIR="$R" uv run python scripts/endpoint_sweep.py \
-  clips/*.wav results/gate2-clips/*.wav results/synthetic-clips/0*.wav | tee "$R/endpoint-sweep.txt"
+  echo "== 3. endpointing sweep (VAD only)"
+  PYTHONPATH=scripts MURMUR_RESULTS_DIR="$R" uv run python scripts/endpoint_sweep.py \
+    clips/*.wav results/gate2-clips/*.wav results/synthetic-clips/0*.wav \
+    | tee "$R/endpoint-sweep.txt"
+fi
+
+# Time to first audio does not depend on reply length, but the model's 20-60 s answers make
+# each run several minutes of playback. Capped for the measurement runs; stated in R3.
+export MURMUR_LLM_MAX_TOKENS=96
 
 echo "== 4. vLLM"
 make serve > "$R/vllm.log" 2>&1 &
@@ -80,7 +95,9 @@ MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause MURMUR_ENDPOINT_COMMIT_MS=6
   $C/b1-ask.wav $C/b1-cut.wav $C/b2-ask.wav $C/b2-cut.wav $C/b3-ask.wav $C/b3-cut.wav
 MURMUR_TTS_DEVICE=cuda MURMUR_TTS_FIRST_CHUNK=clause MURMUR_ENDPOINT_COMMIT_MS=600 \
   run_config tools $C/t1-time.wav $C/t2-calc.wav $C/t3-calc.wav
-grep -h '"tool_call"' "$R/tools/app.log" | cut -c1-300 || echo "no tool calls logged"
+if wanted tools; then
+  grep -h '"tool_call"' "$R/tools/app.log" | cut -c1-300 || echo "no tool calls logged"
+fi
 
 echo "== done"
 uv run python scripts/r3_table.py

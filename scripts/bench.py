@@ -22,7 +22,15 @@ STAGES = [
     "time_to_first_audio",
     "barge_in",
 ]
-PACKAGES = ["faster-whisper", "ctranslate2", "kokoro-onnx", "onnxruntime", "openai", "fastapi"]
+PACKAGES = [
+    "faster-whisper",
+    "ctranslate2",
+    "kokoro-onnx",
+    "onnxruntime-gpu",
+    "fastembed",
+    "openai",
+    "fastapi",
+]
 
 
 def gpu_name() -> str:
@@ -81,6 +89,10 @@ def main() -> int:
             "stt_device": settings.stt_device,
             "tts_voice": settings.tts_voice,
             "tts_handoff": settings.tts_handoff,
+            "tts_first_chunk": settings.tts_first_chunk,
+            "tts_device": settings.tts_device,
+            "endpoint_commit_ms": settings.endpoint_commit_ms,
+            "llm_max_tokens": settings.llm_max_tokens,
             "endpoint_silence_ms": settings.endpoint_silence_ms,
             "packages": {p: version(p) for p in PACKAGES},
         },

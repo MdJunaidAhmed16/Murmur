@@ -9,7 +9,7 @@ from pathlib import Path
 
 from murmur.config import get_settings
 
-CONFIGS = ["baseline", "clause", "gpu", "final"]
+CONFIGS = ["baseline", "clause", "gpu", "final", "tuned"]
 STAGES = [
     ("endpoint", "Endpointing"),
     ("stt_final", "Transcription (final)"),
