@@ -5,6 +5,51 @@ let ws, captureCtx, playbackCtx, playbackNode, micStream;
 let assistantLine = null;
 let audioPlaying = false;
 
+// A random id per browser: in demo mode it selects this visitor's own memory store.
+const VISITOR = (() => {
+  try {
+    let id = localStorage.getItem("murmur-visitor");
+    if (!id) {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      id = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+      localStorage.setItem("murmur-visitor", id);
+    }
+    return id;
+  } catch {
+    // Storage blocked (private window): a fresh id, so memory lasts for this page only.
+    return [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+})();
+
+async function refreshMemories() {
+  try {
+    const res = await fetch(`/api/memories?visitor=${VISITOR}`);
+    if (!res.ok) return;
+    const { memories } = await res.json();
+    const list = $("memories");
+    list.replaceChildren();
+    if (!memories.length) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "Nothing yet. Tell it something about yourself.";
+      list.appendChild(li);
+      return;
+    }
+    for (const m of memories) {
+      const li = document.createElement("li");
+      if (m.replaced_by) li.className = "old";
+      li.textContent = m.text;
+      const since = document.createElement("span");
+      since.className = "since";
+      since.textContent = m.replaced_by ? `replaced by: ${m.replaced_by}` : m.since;
+      li.appendChild(since);
+      list.appendChild(li);
+    }
+  } catch {
+    // The panel is a view; a failed refresh leaves the last one up.
+  }
+}
+
 function setStatus(text, state) {
   $("status").textContent = text;
   $("status").dataset.state = state;
@@ -38,6 +83,8 @@ function showMetrics(record) {
 function onEvent(msg) {
   switch (msg.type) {
     case "config":
+      $("backend").textContent = `· ${msg.backend} model`;
+      $("demo-note").hidden = !msg.demo_mode;
       return startAudio(msg);
     case "speech_start":
       $("partial").textContent = "…";
@@ -68,7 +115,10 @@ function onEvent(msg) {
       assistantLine = null;
       return;
     case "metrics":
-      return showMetrics(msg);
+      showMetrics(msg);
+      // Facts are written in the background after the turn; give the worker a moment.
+      setTimeout(refreshMemories, 2500);
+      return;
     case "error":
       return setStatus(`Error: ${msg.message}`, "error");
   }
@@ -117,7 +167,9 @@ function playPcm(buffer) {
 function start() {
   setStatus("Connecting", "idle");
   $("start").disabled = true;
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws = new WebSocket(
+    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?visitor=${VISITOR}`,
+  );
   ws.binaryType = "arraybuffer";
   ws.onmessage = (e) => (typeof e.data === "string" ? onEvent(JSON.parse(e.data)) : playPcm(e.data));
   ws.onclose = (e) => {
@@ -139,3 +191,4 @@ function stop() {
 
 $("start").onclick = start;
 $("stop").onclick = stop;
+refreshMemories();

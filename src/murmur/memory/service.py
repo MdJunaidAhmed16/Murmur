@@ -4,6 +4,7 @@ import math
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -21,10 +22,13 @@ _USE_WEIGHT = 0.05
 _LOW_PRIORITY_PENALTY = 0.15
 
 
-def open_memory(settings: Settings) -> "MemoryService":
+def open_memory(
+    settings: Settings, path: Path | None = None, embedder: Embedder | None = None
+) -> "MemoryService":
+    """The store at settings.memory_db, or at path. Pass an embedder to share one model."""
     return MemoryService(
-        MemoryStore(settings.memory_db),
-        FastEmbedder(settings.embed_model, settings.models_dir),
+        MemoryStore(path or settings.memory_db),
+        embedder or FastEmbedder(settings.embed_model, settings.models_dir),
         settings.recall_min_similarity,
     )
 
@@ -175,6 +179,10 @@ class MemoryService:
                 self._store.update(memory)
                 self._records[memory.id] = memory
             self._snapshot = self._build_snapshot()
+
+    def close(self) -> None:
+        with self._store.lock:
+            self._store.close()
 
     def forget(self, description: str, threshold: float) -> list[Memory]:
         """Hard delete what matches. Keeping something the user asked to forget is wrong."""

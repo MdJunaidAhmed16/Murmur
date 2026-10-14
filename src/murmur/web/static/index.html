@@ -54,7 +54,13 @@
     table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
     th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
     th { color: var(--muted); font-weight: 500; }
-    .hint { color: var(--muted); font-size: 13px; }
+    .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
+    #memories { list-style: none; margin: 0; padding: 0; }
+    #memories li { padding: 4px 0; border-bottom: 1px solid var(--border); }
+    #memories li:last-child { border-bottom: none; }
+    #memories li.empty { color: var(--muted); }
+    #memories li.old { color: var(--cut); text-decoration: line-through; }
+    #memories .since { color: var(--muted); font-size: 12px; margin-left: 8px; text-decoration: none; }
   </style>
 </head>
 <body>
@@ -72,7 +78,16 @@
   </section>
 
   <section class="panel">
-    <h2>Per-turn latency (ms)</h2>
+    <h2>What it remembers about you</h2>
+    <ul id="memories"><li class="empty">Nothing yet. Tell it something about yourself.</li></ul>
+    <p id="demo-note" class="hint" hidden>
+      Demo: your memories are private to this browser and are wiped when the server sleeps.
+      Say "forget that" to delete something.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Per-turn latency (ms) <span id="backend" class="hint"></span></h2>
     <div class="table-wrap">
       <table>
         <thead>

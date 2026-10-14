@@ -1,33 +1,33 @@
-"""FastAPI app: the demo page and the audio WebSocket."""
+"""FastAPI app: the demo page, the audio WebSocket, and what the agent remembers."""
 
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from mcp import Client
 
 from murmur.agent.loop import Agent
-from murmur.agent.memory_jobs import MemoryJobs
 from murmur.agent.tools import McpToolBox
 from murmur.audio.frames import FRAME_SAMPLES, INPUT_SAMPLE_RATE
 from murmur.audio.vad import SileroVAD
 from murmur.config import Settings, get_settings
 from murmur.llm import LLM, build_llm
-from murmur.mcp_servers.memory import build_memory_server
 from murmur.mcp_servers.tools import build_tools_server
 from murmur.memory import MemoryService, open_memory
+from murmur.memory.embed import FastEmbedder
 from murmur.pipeline.metrics import TurnLog
 from murmur.pipeline.orchestrator import Session
 from murmur.stt.local import WhisperSTT
 from murmur.tts.local import KokoroTTS
+from murmur.web.memory_scope import MemoryScope, open_scope, visitor_store
 
 log = structlog.get_logger()
 STATIC_DIR = Path(__file__).parent / "static"
@@ -42,27 +42,28 @@ class Engines:
     stt: WhisperSTT
     tts: KokoroTTS
     llm: LLM
-    memory: MemoryService
-    memory_jobs: MemoryJobs
-    tools: McpToolBox
+    embedder: FastEmbedder
+    tools_client: Client
+    # One store for personal use; None in demo mode, where each visitor opens their own.
+    shared_scope: MemoryScope | None
     turn_log: TurnLog
-    # Single user, one session at a time (CLAUDE.md scope).
+    # One session at a time (CLAUDE.md scope): the GPU serves one conversation.
     session_lock: asyncio.Lock
 
 
-def load_models(settings: Settings) -> tuple[WhisperSTT, KokoroTTS, MemoryService]:
+def load_models(settings: Settings) -> tuple[WhisperSTT, KokoroTTS, FastEmbedder]:
     stt = WhisperSTT(
         settings.stt_model, settings.stt_device, settings.stt_compute_type, settings.models_dir
     )
     tts = KokoroTTS(
         settings.models_dir, settings.tts_voice, settings.tts_speed, settings.tts_device
     )
-    memory = open_memory(settings)
+    embedder = FastEmbedder(settings.embed_model, settings.models_dir)
     # The first call pays for kernel loading and allocation; keep it out of turn one's numbers.
     stt.warm_up()
     tts.warm_up()
-    memory.recall("warm up", k=1)
-    return stt, tts, memory
+    embedder.embed_query("warm up")
+    return stt, tts, embedder
 
 
 class WebSocketOutbound:
@@ -85,40 +86,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        stt, tts, memory = await asyncio.to_thread(load_models, settings)
+        stt, tts, embedder = await asyncio.to_thread(load_models, settings)
         llm = build_llm(settings)
-        jobs = MemoryJobs.from_settings(llm, memory, settings)
-        memory_server = build_memory_server(
-            memory, settings.forget_threshold, before_forget=jobs.flush
-        )
-        tools_server = build_tools_server(settings.timezone)
-        async with (
-            Client(memory_server) as memory_client,
-            Client(tools_server) as tools_client,
-            asyncio.TaskGroup() as background,
-        ):
-            worker = background.create_task(jobs.run())
-            stale = await jobs.decay()
+        async with AsyncExitStack() as stack:
+            tools_client = await stack.enter_async_context(
+                Client(build_tools_server(settings.timezone))
+            )
+            shared = None
+            if not settings.demo_mode:
+                shared = await stack.enter_async_context(
+                    open_scope(settings, llm, embedder, settings.memory_db)
+                )
             app.state.engines = Engines(
                 settings=settings,
                 stt=stt,
                 tts=tts,
                 llm=llm,
-                memory=memory,
-                memory_jobs=jobs,
-                tools=await McpToolBox.connect([memory_client, tools_client], AGENT_TOOLS),
+                embedder=embedder,
+                tools_client=tools_client,
+                shared_scope=shared,
                 turn_log=TurnLog(settings.results_dir),
                 session_lock=asyncio.Lock(),
             )
             log.info(
                 "ready",
                 url=f"http://{settings.host}:{settings.port}",
-                memories=len(memory.all(include_superseded=False)),
-                decayed=stale,
+                backend=llm.backend_name,
+                demo_mode=settings.demo_mode,
+                memories=len(shared.memory.all(include_superseded=False)) if shared else None,
                 tts_providers=tts.providers,
             )
             yield
-            worker.cancel()
 
     app = FastAPI(lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -127,17 +125,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/healthz")
+    async def healthz() -> dict[str, bool]:
+        # Lifespan has finished loading the models by the time requests are served.
+        return {"ok": True}
+
+    @app.get("/api/memories")
+    async def memories(visitor: str = "") -> dict[str, Any]:
+        engines: Engines = app.state.engines
+        return {"memories": await _list_memories(engines, visitor)}
+
     @app.websocket("/ws")
-    async def audio_socket(websocket: WebSocket) -> None:
+    async def audio_socket(websocket: WebSocket, visitor: str = "") -> None:
         engines: Engines = websocket.app.state.engines
         if engines.session_lock.locked():
-            await websocket.close(code=1013, reason="another session is active")
+            await websocket.close(code=1013, reason="someone else is talking to it; try again soon")
             return
-        async with engines.session_lock:
+        async with engines.session_lock, AsyncExitStack() as stack:
+            if engines.shared_scope is not None:
+                scope = engines.shared_scope
+            else:
+                path = visitor_store(engines.settings, visitor)
+                if path is None:
+                    await websocket.close(code=1008, reason="missing or invalid visitor id")
+                    return
+                scope = await stack.enter_async_context(
+                    open_scope(engines.settings, engines.llm, engines.embedder, path)
+                )
             await websocket.accept()
-            await _serve_session(websocket, engines)
+            await _serve_session(websocket, engines, scope)
 
     return app
+
+
+def _memory_view(memory: MemoryService) -> list[dict[str, Any]]:
+    rows = []
+    for m in sorted(memory.all(include_superseded=True), key=lambda m: m.created_at):
+        replaced = memory.get(m.superseded_by) if m.superseded_by else None
+        rows.append(
+            {
+                "text": m.text,
+                "since": m.created_at.date().isoformat(),
+                "replaced_by": replaced.text if replaced else None,
+            }
+        )
+    return rows
+
+
+async def _list_memories(engines: Engines, visitor: str) -> list[dict[str, Any]]:
+    if engines.shared_scope is not None:
+        return _memory_view(engines.shared_scope.memory)
+    path = visitor_store(engines.settings, visitor)
+    if path is None:
+        raise HTTPException(400, "missing or invalid visitor id")
+    if not path.exists():
+        return []
+    # A short-lived read of the visitor's own file; WAL lets it run beside a live session.
+    memory = await asyncio.to_thread(open_memory, engines.settings, path, engines.embedder)
+    try:
+        return _memory_view(memory)
+    finally:
+        memory.close()
 
 
 def _parse_control(text: str) -> dict[str, Any]:
@@ -148,17 +196,18 @@ def _parse_control(text: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-async def _serve_session(websocket: WebSocket, engines: Engines) -> None:
+async def _serve_session(websocket: WebSocket, engines: Engines, scope: MemoryScope) -> None:
     settings = engines.settings
     outbound = WebSocketOutbound(websocket)
+    tools = await McpToolBox.connect([scope.client, engines.tools_client], AGENT_TOOLS)
     session = Session(
         settings=settings,
         vad=SileroVAD(settings.models_dir / "silero_vad.onnx"),
         stt=engines.stt,
         tts=engines.tts,
-        agent=Agent(engines.llm, settings.working_memory_turns, engines.tools),
-        memory=engines.memory,
-        memory_jobs=engines.memory_jobs,
+        agent=Agent(engines.llm, settings.working_memory_turns, tools),
+        memory=scope.memory,
+        memory_jobs=scope.jobs,
         backend_name=engines.llm.backend_name,
         outbound=outbound,
         turn_log=engines.turn_log,
@@ -169,9 +218,11 @@ async def _serve_session(websocket: WebSocket, engines: Engines) -> None:
             "input_sample_rate": INPUT_SAMPLE_RATE,
             "frame_samples": FRAME_SAMPLES,
             "output_sample_rate": engines.tts.sample_rate,
+            "backend": engines.llm.backend_name,
+            "demo_mode": settings.demo_mode,
         }
     )
-    log.info("session_open")
+    log.info("session_open", backend=engines.llm.backend_name)
     try:
         while True:
             message = await websocket.receive()
