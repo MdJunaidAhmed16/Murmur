@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,13 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:8000/v1"
     llm_model: str = "Qwen/Qwen2.5-1.5B-Instruct"
     llm_max_tokens: int = 256
+
+    # Hosted backend: Claude via OpenRouter. Opus 5.5 is the default model; for the lowest time
+    # to first token in a voice demo, anthropic/claude-haiku-5.5 is the one to measure (R4).
+    hosted_base_url: str = "https://openrouter.ai/api/v1"
+    hosted_model: str = "anthropic/claude-opus-5.5"
+    hosted_reasoning_effort: Literal["low", "medium", "high"] = "low"
+    openrouter_api_key: SecretStr | None = None
 
     stt_model: str = "small.en"
     stt_device: Literal["cuda", "cpu"] = "cuda"
@@ -47,6 +55,11 @@ class Settings(BaseSettings):
     barge_in_onset_ms: int = 96
 
     working_memory_turns: int = 12
+
+    # Public demo: each browser gets its own memory store under demo_dir, so one visitor never
+    # hears another's facts. Off for personal use, where there is one user and one store.
+    demo_mode: bool = False
+    demo_dir: Path = Path("data/visitors")
 
     memory_db: Path = Path("data/memory.db")
     embed_model: str = "BAAI/bge-small-en-v1.5"
