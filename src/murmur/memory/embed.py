@@ -24,7 +24,14 @@ class FastEmbedder:
         from fastembed import TextEmbedding
 
         # Two threads: one query at a time, and STT/TTS need the remaining cores.
-        self._model = TextEmbedding(model, cache_dir=str(cache_dir), threads=2)
+        self._model = TextEmbedding(
+            model,
+            cache_dir=str(cache_dir),
+            threads=2,
+            # CPU on purpose, also when onnxruntime-gpu is installed: the 6 ms query is cheaper
+            # than a GPU round trip, and the VRAM belongs to the LLM.
+            providers=["CPUExecutionProvider"],
+        )
 
     def embed_query(self, text: str) -> Vector:
         # bge uses an instruction prefix for queries; query_embed adds it. Outputs are unit length.

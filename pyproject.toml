@@ -13,15 +13,27 @@ dependencies = [
     "structlog",
     "numpy",
     "openai",
-    "onnxruntime",
+    # 1.26 is the last CUDA 12 build. Later ones ship CUDA 13 with a libcudnn.so.9 of the same
+    # name as the CUDA 12 one ctranslate2 loads; two in one process is asking for trouble.
+    # Still provides the CPU provider that VAD and embeddings use.
+    "onnxruntime-gpu==1.26.0",
     "faster-whisper",
     "kokoro-onnx",
-    # ctranslate2 loads cuBLAS/cuDNN at runtime; these wheels supply them without a system CUDA.
+    # ctranslate2 and onnxruntime load CUDA at runtime; these wheels supply it without a
+    # system CUDA install. One set, CUDA 12, shared by STT and TTS.
     "nvidia-cublas-cu12",
     "nvidia-cudnn-cu12==9.*",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cufft-cu12",
+    "nvidia-curand-cu12",
     "fastembed>=0.9.0",
     "mcp>=2.3.0",
 ]
+
+[tool.uv]
+# kokoro-onnx and fastembed depend on the CPU-only "onnxruntime"; both packages install the same
+# module, so the GPU build replaces it rather than sitting alongside it.
+override-dependencies = ["onnxruntime ; sys_platform == 'never'"]
 
 [dependency-groups]
 dev = [

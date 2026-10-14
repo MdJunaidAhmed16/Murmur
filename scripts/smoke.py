@@ -17,7 +17,10 @@ SENTENCE = "My sister is called Afifa and she plays badminton on weekday evening
 
 async def main() -> int:
     settings = get_settings()
-    tts = KokoroTTS(settings.models_dir, settings.tts_voice, settings.tts_speed)
+    tts = KokoroTTS(
+        settings.models_dir, settings.tts_voice, settings.tts_speed, settings.tts_device
+    )
+    print(f"tts providers: {tts.providers}")
     stt = WhisperSTT(
         settings.stt_model, settings.stt_device, settings.stt_compute_type, settings.models_dir
     )
