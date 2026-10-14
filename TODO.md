@@ -78,11 +78,11 @@ to cut scope from, not a day to extend.
 
 ## Days 7–8 — Make it feel real
 
-- [ ] Barge-in: stop playback, cancel generation, drop queued synthesis
+- [x] Barge-in: stop playback, cancel generation, drop queued synthesis
 - [ ] Partial turns recorded as **spoken**, not generated
 - [ ] Endpointing tuned; both failure modes measured and written down
-- [ ] Sentence-level TTS handoff
-- [ ] Tools MCP server (keep it small — 2 or 3 tools)
+- [x] Sentence-level TTS handoff
+- [x] Tools MCP server (keep it small — 2 or 3 tools)
 - [ ] Optimisation pass against the budget table
 
 ### Gate 3

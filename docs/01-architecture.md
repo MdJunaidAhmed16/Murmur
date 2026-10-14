@@ -72,14 +72,25 @@ The hard part is the partial turn. The agent said half a sentence and the user
 interrupted — what the agent actually said, not what it intended to say, is what
 goes into the conversation history. Record spoken text, not generated text.
 
+**As built (day 7).** A turn lives until its audio has finished playing, so a reply
+still audible is a reply that can be cut. Detection has two stages: 96 ms of speech
+*pauses* playback, 250 ms confirms and *clears* it, and a false start *resumes*. On
+clear the browser reports how many samples it dropped; a per-sentence ledger of
+audio sent maps that back to the words actually heard, and only those are
+committed. Details and measurements in `reports/R3-latency.md`.
+
+**Turn-taking.** The turn starts at 200 ms of silence but its first audio is held
+until 600 ms (speculative endpointing). A user who carries on in between cancels
+the turn before anything is heard, and their words merge into the next turn.
+
 ## Modules
 
 ```
 src/murmur/
 ├── audio/
-│   ├── capture.py        # mic → frames
-│   ├── playback.py       # frames → speaker, cancellable
-│   └── vad.py            # speech/silence detection
+│   ├── frames.py         # wire format, PCM conversions
+│   └── vad.py            # speech/silence detection, onset and endpoint
+│                         # (capture and cancellable playback are AudioWorklets in web/static)
 ├── stt/
 │   ├── base.py           # the interface
 │   └── local.py          # streaming transcription
@@ -92,13 +103,16 @@ src/murmur/
 │   └── hosted.py         # API
 ├── agent/
 │   ├── loop.py           # turn handling, tool calls
-│   └── prompts.py        # system prompt, one constant
+│   ├── prompts.py        # system prompt and memory prompts
+│   ├── memory_jobs.py    # extraction and consolidation, off the turn path
+│   └── tools.py          # MCP tool client, intent-gated
 ├── memory/               # see 02-memory.md
 ├── mcp_servers/
 │   ├── memory.py
 │   └── tools.py
 ├── pipeline/
 │   ├── orchestrator.py   # wires the stages, owns cancellation
+│   ├── playback.py       # what was heard: audio sent per sentence → words
 │   └── metrics.py        # per-stage timing, the only timing code
 ├── web/                  # demo page
 └── config.py             # one Settings object
