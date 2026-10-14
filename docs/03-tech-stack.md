@@ -11,14 +11,14 @@ the project exists.
 | VAD | Silero VAD (ONNX) | Small, fast, runs on CPU alongside everything else |
 | STT | faster-whisper `small.en` | Local, good enough, well understood |
 | LLM (local) | Qwen2.5-1.5B-Instruct on vLLM | Fits 8GB with room for KV cache; tool-capable |
-| LLM (hosted) | Any API model | Same interface, for the always-on demo |
+| LLM (hosted) | Claude via OpenRouter | Same interface, for the always-on demo; see decisions |
 | TTS | Kokoro 82M (ONNX) | Streaming synthesis, better voice than Piper; see decisions |
 | Tools | MCP (Python SDK 2.x), in-process | One tool layer the agent consumes |
 | Memory store | SQLite + in-memory numpy matrix | One file, no server, survives restarts |
 | Embeddings | bge-small-en-v1.5 via fastembed (ONNX, CPU) | ~6 ms per query, inside the 40 ms recall budget |
 | Retrieval | Cosine + recency/use boosts, hand-rolled | Sub-millisecond at this scale; see decisions |
 | Web | FastAPI + raw PCM over WebSocket | Audio in and out of a browser |
-| Deploy | GCP | Hosted backend and the public demo |
+| Deploy | GCP Cloud Run, one L4 GPU | Public demo, scales to zero; `docs/deploy.md` |
 
 ## Decisions
 
@@ -57,6 +57,23 @@ replaces the CPU `onnxruntime` package (a uv override) and still provides the CP
 provider that VAD and embeddings use. Measured in R3: first audio 1099 → 212 ms
 p50, so GPU is the default (`MURMUR_TTS_DEVICE=cpu` for machines without one).
 Revisit when ctranslate2 ships for CUDA 13.
+
+**Hosted LLM: Claude through OpenRouter (day 9).** OpenRouter speaks the same OpenAI
+chat protocol as vLLM, so both backends are one client class with different options
+(`llm/openai_chat.py`); the only behavioural difference is that Claude 5.x rejects
+sampling parameters, so the hosted backend sends reasoning effort (`low`) instead of
+temperature. Default model `anthropic/claude-opus-5.5`; Haiku 5.5 is the latency
+candidate to compare (`MURMUR_HOSTED_MODEL`).
+
+**Deploy: Cloud Run with one L4 GPU, scale to zero (day 9).** STT and TTS still need a
+GPU to stay inside the budget, and scale-to-zero means an idle demo costs nothing; the
+price is a cold start for the first visitor. The image is built by Cloud Build so model
+downloads happen on Google's network. One instance, one conversation at a time.
+
+**Demo memory is per visitor (day 9).** A single shared store would let one stranger
+hear another's facts. In demo mode each browser sends a random id and gets its own
+SQLite file; the files are ephemeral on Cloud Run. Personal use keeps the single store.
+This is isolation for privacy, not multi-user accounts, which stay out of scope.
 
 **Retrieval: no LlamaIndex (day 4).** One user's store is a few hundred facts. A
 numpy dot product over them is sub-millisecond; the query embedding (~6 ms) is the
