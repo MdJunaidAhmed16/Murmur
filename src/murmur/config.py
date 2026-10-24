@@ -17,10 +17,10 @@ class Settings(BaseSettings):
     llm_model: str = "Qwen/Qwen2.5-1.5B-Instruct"
     llm_max_tokens: int = 256
 
-    # Hosted backend: Claude via OpenRouter. Opus 5.5 is the default model; for the lowest time
-    # to first token in a voice demo, anthropic/claude-haiku-5.5 is the one to measure (R4).
+    # Hosted backend: Claude via OpenRouter. Haiku 5.5: first token p50 898 ms through
+    # OpenRouter against Opus 5.5's 2868 ms (scripts/hosted_probe.py), at ~1/40 the price.
     hosted_base_url: str = "https://openrouter.ai/api/v1"
-    hosted_model: str = "anthropic/claude-opus-5.5"
+    hosted_model: str = "anthropic/claude-haiku-5.5"
     hosted_reasoning_effort: Literal["low", "medium", "high"] = "low"
     openrouter_api_key: SecretStr | None = None
 
