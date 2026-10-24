@@ -31,8 +31,11 @@ ENV MURMUR_BACKEND=hosted \
     MURMUR_MEMORY_DB=/tmp/memory.db
 
 # Weights baked into the image: a cold start loads from local disk instead of downloading.
+# Two Whisper sizes: small.en for a GPU instance, base.en for CPU-only, where small.en took
+# 1.3 s for one sentence on 4 cores. The deploy picks one with MURMUR_STT_MODEL.
 COPY scripts/download_models.py ./scripts/
-RUN uv run --no-sync python scripts/download_models.py
+RUN uv run --no-sync python scripts/download_models.py \
+    && MURMUR_STT_MODEL=base.en uv run --no-sync python scripts/download_models.py
 
 # ctranslate2 finds cuBLAS/cuDNN from the pip wheels only if they are on the loader path.
 ENV LD_LIBRARY_PATH=/app/.venv/lib/python3.12/site-packages/nvidia/cublas/lib:/app/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib

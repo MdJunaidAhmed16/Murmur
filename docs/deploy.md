@@ -1,5 +1,18 @@
 # Deploying the public demo
 
+**Fastest path (no local install): Google Cloud Shell.** After steps 1, 3–4 and 6 below, open
+Cloud Shell (the `>_` icon in the console) and run:
+
+```bash
+git clone https://github.com/MdJunaidAhmed16/Murmur.git && cd Murmur
+PROJECT=$(gcloud config get-value project) GPU=0 bash scripts/deploy_cloudrun.sh   # CPU, no quota
+# later, once the L4 quota is granted:
+PROJECT=$(gcloud config get-value project) GPU=1 bash scripts/deploy_cloudrun.sh
+```
+
+`GPU=0` runs Whisper `base.en` and Kokoro on 4 vCPUs: no GPU quota needed, slower to first
+audio. `GPU=1` uses one L4.
+
 The demo runs on **Cloud Run with one NVIDIA L4 GPU**. Whisper and Kokoro run on the GPU;
 the LLM is **Claude through OpenRouter** (`MURMUR_BACKEND=hosted`). It scales to zero when
 nobody is using it, so an idle demo costs nothing. The trade-off is a cold start: the first
