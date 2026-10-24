@@ -39,7 +39,8 @@ run_config() {  # run_config <name> <replay args...>; MURMUR_* settings come fro
   wanted "$name" || return 0
   local dir="$R/$name"
   rm -rf "$dir"; mkdir -p "$dir"
-  echo "== $name: $(env | grep '^MURMUR_' | sort | tr '\n' ' ')"
+  # Settings only; anything named like a secret is left out of the log.
+  echo "== $name: $(env | grep '^MURMUR_' | grep -viE 'key|token|secret' | sort | tr '\n' ' ')"
   MURMUR_RESULTS_DIR="$dir" MURMUR_MEMORY_DB="$dir/memory.db" make run > "$dir/app.log" 2>&1 &
   wait_for "$dir/app.log" '"ready"|Traceback' 180
   grep -o '"tts_providers": \[[^]]*\]' "$dir/app.log" || true
