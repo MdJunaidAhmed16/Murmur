@@ -48,13 +48,30 @@ _SELF = re.compile(r"\b(i|i'm|im|i've|i'd|i'll|my|mine|myself|we|our)\b", re.IGN
 _ASKED_ABOUT_USER = re.compile(r"\b(you|your|yours)\b[^.!]*\?", re.IGNORECASE)
 
 
+# A sentence that asks rather than tells: ends in "?" and opens with a question word.
+_QUESTION = re.compile(
+    r"^\s*(?:(?:and|so|but|also|then|oh|okay|ok)\b[\s,]*)?"
+    r"(what|what's|which|who|whose|where|when|why|how|do|does|did|is|are|am|was|were|can|"
+    r"could|would|should|will|shall|have|has)\b[^.!?]*\?",
+    re.IGNORECASE,
+)
+
+
+def statements(text: str) -> str:
+    """The text without its questions. "I moved to Pune, any tips?" keeps its statement."""
+    sentences = re.findall(r"[^.!?]+[.!?]*", text)
+    return " ".join(s for s in sentences if not _QUESTION.match(s))
+
+
 def worth_extracting(user_text: str, previous_reply: str) -> bool:
     """Facts about the user come in the first person, or as answers to a question about them.
 
     "What's the capital of Australia?" is neither, and a small model asked anyway will store
-    the answer as if it were about the user.
+    the answer as if it were about the user. Neither is "What's my sister's name?": asked to
+    extract from it, the 1.5B model invented "Sport played - Cricket" in the demo recording.
     """
-    return bool(_SELF.search(user_text) or _ASKED_ABOUT_USER.search(previous_reply))
+    told = statements(user_text)
+    return bool(_SELF.search(told) or (told.strip() and _ASKED_ABOUT_USER.search(previous_reply)))
 
 
 def is_grounded(fact: str, source: str) -> bool:

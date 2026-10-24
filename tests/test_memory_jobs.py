@@ -47,6 +47,10 @@ def test_only_turns_about_the_user_are_extracted() -> None:
     assert worth_extracting("Mostly old ghazals.", "What music do you like?")
     assert not worth_extracting("What's the capital of Australia?", "")
     assert not worth_extracting("Tell me a joke.", "Here is one. Want another?")
+    # Questions about yourself are not new facts; the statement beside one still is.
+    assert not worth_extracting("What's my sister's name? And which sport do I play?", "")
+    assert worth_extracting("I just moved to Pune, any tips?", "")
+    assert worth_extracting("My dog is Biscuit. Do you like dogs?", "")
 
 
 def test_grounding_drops_invented_facts() -> None:
