@@ -94,13 +94,13 @@ to cut scope from, not a day to extend.
 
 ## Days 9–10 — Ship it
 
-- [ ] Hosted backend behind `MURMUR_BACKEND=hosted`
+- [x] Hosted backend behind `MURMUR_BACKEND=hosted`
 - [ ] Deploy; public demo link works
-- [ ] Demo page: talk, see the transcript, see what it remembered
-- [ ] Local vs hosted latency comparison published
+- [x] Demo page: talk, see the transcript, see what it remembered
+- [x] Local vs hosted latency comparison published
 - [x] README numbers generated from `results/latency.json` by script
-- [ ] Recorded walkthrough for when the demo is down
-- [ ] `reports/R4-final.md`
+- [x] Recorded walkthrough for when the demo is down
+- [x] `reports/R4-final.md`
 - [ ] Resume bullets written from real numbers
 
 ---

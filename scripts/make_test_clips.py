@@ -25,6 +25,13 @@ CLIPS = {
     "t1-time.wav": "What time is it right now?",
     "t2-calc.wav": "What is eighteen times forty two?",
     "t3-calc.wav": "What's fifteen percent of two thousand four hundred?",
+    # The README demo video, in order (scripts/record_demo).
+    "d1-intro.wav": "Hi! I play badminton on weekday evenings, and my sister is called Sara.",
+    "d2-calc.wav": "Quick one. What is eighteen times forty two?",
+    "d3-story.wav": "Tell me a story about a dragon who is afraid of fire.",
+    "d4-cut.wav": "Okay, stop. That's enough, thanks.",
+    "d5-recall.wav": "What's my sister's name, and which sport do I play?",
+    "d6-forget.wav": "Please forget my sister's name.",
 }
 
 
